@@ -121,6 +121,14 @@ function Catalog.IsRaidDifficultyId(diffId)
     return id >= 1 and id <= 50
 end
 
+--- Official legacy N↔H partners (DifficultyID). Used if C API read fails.
+local TOGGLE_FALLBACK = {
+    [3] = 5,
+    [5] = 3,
+    [4] = 6,
+    [6] = 4,
+}
+
 --- Other difficulty IDs that share an instance lockout with this one (empty if independent).
 --- Per Blizzard: only GetDifficultyInfo toggleDifficultyID (legacy 10/25 N↔H: 3↔5, 4↔6).
 --- Flexible Normal/Heroic (14/15), Mythic (16), LFR (7/17) are independent lockouts.
@@ -134,16 +142,18 @@ function Catalog.GetSharedLockoutDifficulties(diffId)
     if not Catalog.IsRaidDifficultyId(id) then
         return {}
     end
-    if not GetDifficultyInfo then
-        return {}
+    local toggle
+    if GetDifficultyInfo then
+        -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
+        -- pcall(fn, id) + explicit locals — avoid select(n, GetDifficultyInfo(...)) on WoW C returns.
+        local ok, _, _, _, _, _, _, apiToggle = pcall(GetDifficultyInfo, id)
+        if ok then
+            toggle = tonumber(apiToggle)
+        end
     end
-    -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
     -- Blizzard returns 0 when there is no partner; Lua treats 0 as truthy, so reject 0 explicitly.
-    local ok, toggle = pcall(function()
-        return tonumber(select(7, GetDifficultyInfo(id)))
-    end)
-    if not ok then
-        return {}
+    if not toggle or toggle == 0 then
+        toggle = TOGGLE_FALLBACK[id]
     end
     if toggle and toggle ~= 0 and toggle ~= id then
         return { toggle }

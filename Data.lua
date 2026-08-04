@@ -343,9 +343,8 @@ function Data.DumpDebugLockouts(skipRequest)
     local dumpDiffs = { 3, 4, 5, 6, 7, 9, 14, 15, 16, 17 }
     if GetDifficultyInfo then
         for _, diffId in ipairs(dumpDiffs) do
-            local ok, name, _, isHeroic, _, _, _, toggle = pcall(function()
-                return GetDifficultyInfo(diffId)
-            end)
+            -- Same call pattern as GetSharedLockoutDifficulties (no select on C returns).
+            local ok, name, _, isHeroic, _, _, _, toggle = pcall(GetDifficultyInfo, diffId)
             if not ok then
                 add("  diff %s GetDifficultyInfo error: %s", tostring(diffId), tostring(name))
             else

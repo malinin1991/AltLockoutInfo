@@ -2161,6 +2161,16 @@ do
     local shared25n = Catalog.GetSharedLockoutDifficulties(4)
     assert_eq(shared25n[1], 6, "Shared: 25N ↔ 25H via toggleDifficultyID")
 
+    -- Fallback pairs still work if GetDifficultyInfo omits toggle (truncated returns).
+    local prevGDI = _G.GetDifficultyInfo
+    _G.GetDifficultyInfo = function(id)
+        return "Diff" .. tostring(id)
+    end
+    assert_eq(Catalog.GetSharedLockoutDifficulties(6)[1], 4, "Shared: fallback 25H → 25N when API omits toggle")
+    assert_eq(Catalog.GetSharedLockoutDifficulties(3)[1], 5, "Shared: fallback 10N → 10H when API omits toggle")
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(14), 0, "Shared: fallback does not invent N↔H for flex")
+    _G.GetDifficultyInfo = prevGDI
+
     local sharedLfr = Catalog.GetSharedLockoutDifficulties(17)
     assert_eq(#sharedLfr, 0, "Shared: LFR is independent")
     local sharedMythic = Catalog.GetSharedLockoutDifficulties(16)
