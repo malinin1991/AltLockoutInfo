@@ -50,6 +50,9 @@ local function EnsureRoot()
     if type(db.settings.ui.collapsedRaidsMain) ~= "table" then
         db.settings.ui.collapsedRaidsMain = {}
     end
+    if type(db.settings.ui.collapsedWorldBossOptions) ~= "table" then
+        db.settings.ui.collapsedWorldBossOptions = {}
+    end
     if type(db.settings.ui.collapsedChars) ~= "table" then
         db.settings.ui.collapsedChars = {}
     end
@@ -279,6 +282,104 @@ function DB.LockoutKey(instanceId, difficultyId)
     return tostring(instanceId) .. ":" .. tostring(difficultyId)
 end
 
+--- Prefer the stronger of two lockout rows (more kills, then fresher reset/recorded).
+local function PreferLockout(a, b)
+    if not a then
+        return b
+    end
+    if not b then
+        return a
+    end
+    local Data = ns.Data
+    local ak, at = 0, 0
+    local bk, bt = 0, 0
+    if Data and Data.CountKilledBosses then
+        ak, at = Data.CountKilledBosses(a)
+        bk, bt = Data.CountKilledBosses(b)
+    else
+        ak = tonumber(a.encounterProgress) or 0
+        at = tonumber(a.numEncounters) or 0
+        bk = tonumber(b.encounterProgress) or 0
+        bt = tonumber(b.numEncounters) or 0
+    end
+    if ak ~= bk then
+        return ak > bk and a or b
+    end
+    local aProg = at > 0 and (ak / at) or 0
+    local bProg = bt > 0 and (bk / bt) or 0
+    if aProg ~= bProg then
+        return aProg > bProg and a or b
+    end
+    local aReset = tonumber(a.resetAt) or 0
+    local bReset = tonumber(b.resetAt) or 0
+    if aReset ~= bReset then
+        return aReset > bReset and a or b
+    end
+    local aRec = tonumber(a.recordedAt) or 0
+    local bRec = tonumber(b.recordedAt) or 0
+    if aRec ~= bRec then
+        return aRec > bRec and a or b
+    end
+    return b
+end
+
+--- Re-key stored lockouts when a difficulty/encounter id changes (e.g. synthetic → EJ).
+--- Walks every character so alts keep showing locked until their next scan.
+--- Returns number of remapped lockout entries.
+function DB.RemapDifficultyLockouts(instanceId, fromDifficultyId, toDifficultyId)
+    if instanceId == nil or fromDifficultyId == nil or toDifficultyId == nil then
+        return 0
+    end
+    if fromDifficultyId == toDifficultyId then
+        return 0
+    end
+    local wantInst = tonumber(instanceId) or instanceId
+    local wantFrom = tonumber(fromDifficultyId) or fromDifficultyId
+    local toDiff = tonumber(toDifficultyId) or toDifficultyId
+    local fromKey = DB.LockoutKey(instanceId, fromDifficultyId)
+    local toKey = DB.LockoutKey(instanceId, toDifficultyId)
+    local changed = 0
+
+    for _, char in pairs(DB.GetCharacters()) do
+        if type(char.lockouts) == "table" then
+            local lo = char.lockouts[fromKey]
+            local oldKey = fromKey
+            if not lo then
+                for key, entry in pairs(char.lockouts) do
+                    local loDiff = tonumber(entry.difficultyId) or entry.difficultyId
+                    local loInst = tonumber(entry.instanceId) or entry.instanceId
+                    if loDiff == wantFrom
+                        and (loInst == wantInst or entry.instanceId == instanceId
+                            or entry.savedInstanceId == instanceId
+                            or (tonumber(entry.savedInstanceId) or entry.savedInstanceId) == wantInst)
+                    then
+                        lo = entry
+                        oldKey = key
+                        break
+                    end
+                end
+            end
+            if lo then
+                char.lockouts[oldKey] = nil
+                lo.difficultyId = toDiff
+                lo.instanceId = wantInst
+                local existing = char.lockouts[toKey]
+                if not existing then
+                    char.lockouts[toKey] = lo
+                else
+                    -- Collision: keep the stronger row (do not drop a richer from-key lockout).
+                    local winner = PreferLockout(lo, existing)
+                    winner.difficultyId = toDiff
+                    winner.instanceId = wantInst
+                    char.lockouts[toKey] = winner
+                end
+                changed = changed + 1
+            end
+        end
+    end
+    return changed
+end
+
 function DB.SetLockouts(guid, lockoutsByKey)
     local char = DB.EnsureCharacter(guid)
     char.lockouts = lockoutsByKey or {}
@@ -323,6 +424,7 @@ function DB.GetUI()
         db.settings.ui = {
             collapsedTiers = {},
             collapsedRaidsMain = {},
+            collapsedWorldBossOptions = {},
             collapsedChars = {},
             showCollectedMounts = false,
             collapsedMountTiers = {},
@@ -333,6 +435,9 @@ function DB.GetUI()
     end
     if type(db.settings.ui.collapsedRaidsMain) ~= "table" then
         db.settings.ui.collapsedRaidsMain = {}
+    end
+    if type(db.settings.ui.collapsedWorldBossOptions) ~= "table" then
+        db.settings.ui.collapsedWorldBossOptions = {}
     end
     if type(db.settings.ui.collapsedChars) ~= "table" then
         db.settings.ui.collapsedChars = {}
@@ -414,6 +519,36 @@ function DB.SetRaidCollapsedMain(instanceId, collapsed)
     if collapsed then
         c[id] = true
     end
+end
+
+--- World-boss boss list under a location in Options → Raids (default collapsed).
+function DB.IsWorldBossOptionsCollapsed(instanceId)
+    local c = DB.GetUI().collapsedWorldBossOptions
+    local id = tonumber(instanceId) or instanceId
+    local v = c[id]
+    if v == nil then
+        v = c[tostring(instanceId)]
+    end
+    if v == nil and tonumber(instanceId) ~= nil then
+        v = c[tonumber(instanceId)]
+    end
+    -- Default collapsed to avoid horizontal overflow on first open.
+    if v == nil then
+        return true
+    end
+    return v == true
+end
+
+function DB.SetWorldBossOptionsCollapsed(instanceId, collapsed)
+    local c = DB.GetUI().collapsedWorldBossOptions
+    local id = tonumber(instanceId) or instanceId
+    c[id] = nil
+    c[tostring(instanceId)] = nil
+    if tonumber(instanceId) ~= nil then
+        c[tonumber(instanceId)] = nil
+    end
+    -- Store explicit false so user-expanded state persists (default is collapsed).
+    c[id] = collapsed and true or false
 end
 
 function DB.IsCharCollapsed(guid)

@@ -184,6 +184,11 @@ do
     assert_eq(haveDrov, true, "DraenorWB: Drov encounter present")
     assert_eq(haveRukhmarEj, true, "DraenorWB: Rukhmar EJ encounter present")
     assert_eq(Catalog.GetDifficultyLabel(1262), "Rukhmar", "DraenorWB: label is Rukhmar")
+    local haveSynthetic = false
+    for _, d in ipairs(raid.difficulties) do
+        if d == 900001 then haveSynthetic = true end
+    end
+    assert_eq(haveSynthetic, false, "DraenorWB: must not duplicate Rukhmar via synthetic 900001")
 
     local rows = Mounts.BuildFromEJSync()
     local mountRow
@@ -204,6 +209,110 @@ do
     assert_eq(Catalog.GetDifficultyLabel(mountRow.difficulties[1]),
         Catalog.GetEncounterLabel(mountRow.difficulties[1]),
         "DraenorWB: UI label is boss name not Обычный")
+end
+
+----------------------------------------------------------------
+-- Synthetic Rukhmar 900001 → EJ 1262: migrate tracked + lockouts
+----------------------------------------------------------------
+do
+    local ns = freshNs()
+    local Catalog = ns.Catalog
+    local DB = ns.DB
+    local Data = ns.Data
+
+    _G.EJ_GetNumTiers = function() return 1 end
+    _G.EJ_GetCurrentTier = function() return 1 end
+    _G.EJ_GetTierInfo = function() return "Warlords of Draenor" end
+    _G.EJ_SelectInstance = function() end
+    _G.EJ_IsValidInstanceDifficulty = function(d) return d == 14 end
+    _G.EJ_GetInstanceByIndex = function(index, isRaid)
+        if index == 1 and isRaid then
+            return 557, "Draenor", "d", 1, 2, 3, 4, 0, "l", true, 1116
+        end
+        return nil
+    end
+    local encounters = {
+        [1] = { name = "Drov the Ruiner", id = 1291 },
+        [2] = { name = "Rukhmar", id = 1262 },
+    }
+    _G.EJ_GetEncounterInfoByIndex = function(e)
+        local enc = encounters[e]
+        if not enc then return nil end
+        return enc.name, "desc", enc.id, 0, "link", 557
+    end
+    _G.EJ_SelectEncounter = function() end
+    _G.EJ_GetNumLoot = function() return 0 end
+
+    -- Pre-migration SavedVariables: tracked + lockout under synthetic id.
+    DB.SetTracked(557, 900001, true)
+    local guid = "Player-1-RUKH"
+    local guid2 = "Player-2-ALT"
+    DB.EnsureCharacter(guid)
+    DB.EnsureCharacter(guid2)
+    local oldKey = DB.LockoutKey(557, 900001)
+    local loPayload = {
+        instanceId = 557,
+        difficultyId = 900001,
+        name = "Rukhmar",
+        encounterProgress = 1,
+        numEncounters = 1,
+        bosses = { { name = "Rukhmar", killed = true } },
+        resetAt = time() + 86400,
+        recordedAt = time(),
+        locked = true,
+    }
+    DB.SetLockouts(guid, { [oldKey] = loPayload })
+    DB.SetLockouts(guid2, {
+        [oldKey] = {
+            instanceId = 557,
+            difficultyId = 900001,
+            name = "Rukhmar",
+            encounterProgress = 1,
+            numEncounters = 1,
+            bosses = { { name = "Rukhmar", killed = true } },
+            resetAt = time() + 86400,
+            recordedAt = time(),
+            locked = true,
+        },
+    })
+    assert_eq(DB.IsTracked(557, 900001), true, "RukhmarMigrate: pre-build tracked under synthetic")
+    assert_eq(select(1, Data.GetLockoutStatus(guid, 557, 900001)), "complete",
+        "RukhmarMigrate: pre-build lockout under synthetic")
+
+    Catalog.Build()
+
+    assert_eq(DB.IsTracked(557, 1262), true, "RukhmarMigrate: tracked moved to EJ id")
+    assert_eq(DB.IsTracked(557, 900001), false, "RukhmarMigrate: synthetic track cleared")
+    local newKey = DB.LockoutKey(557, 1262)
+    assert_true(DB.GetCharacter(guid).lockouts[newKey] ~= nil, "RukhmarMigrate: lockout re-keyed")
+    assert_eq(DB.GetCharacter(guid).lockouts[oldKey], nil, "RukhmarMigrate: old key removed")
+    assert_eq(DB.GetLockout(guid, 557, 1262).difficultyId, 1262, "RukhmarMigrate: difficultyId updated")
+    assert_eq(select(1, Data.GetLockoutStatus(guid, 557, 1262)), "complete",
+        "RukhmarMigrate: UI status via EJ id (not free)")
+    assert_eq(select(1, Data.GetLockoutStatus(guid2, 557, 1262)), "complete",
+        "RukhmarMigrate: alt lockout also remapped")
+    -- BossNameCandidates must not hole-skip EN fallback when locale missing.
+    local saved = ns.L["WB_BOSS_RUKHMAR"]
+    ns.L["WB_BOSS_RUKHMAR"] = nil
+    local names = Catalog.BossNameCandidates({
+        bossLocaleKey = "WB_BOSS_RUKHMAR",
+        bossName = "Rukhmar",
+    })
+    assert_eq(names[1], "Rukhmar", "RukhmarMigrate: EN bossName survives missing locale")
+    ns.L["WB_BOSS_RUKHMAR"] = saved
+end
+
+----------------------------------------------------------------
+-- World-boss options: default collapsed
+----------------------------------------------------------------
+do
+    local ns = freshNs()
+    local DB = ns.DB
+    assert_eq(DB.IsWorldBossOptionsCollapsed(557), true, "WBCollapse: default collapsed")
+    DB.SetWorldBossOptionsCollapsed(557, false)
+    assert_eq(DB.IsWorldBossOptionsCollapsed(557), false, "WBCollapse: user expanded persists")
+    DB.SetWorldBossOptionsCollapsed(557, true)
+    assert_eq(DB.IsWorldBossOptionsCollapsed(557), true, "WBCollapse: user collapsed")
 end
 
 ----------------------------------------------------------------
@@ -1009,6 +1118,19 @@ do
     local hasMythicIcc = false
     for _, d in ipairs(icc) do if d == 16 then hasMythicIcc = true end end
     assert_eq(hasMythicIcc, false, "ValidDiff: ICC has no mythic")
+
+    -- Legacy LFR (difficulty 7) for pre-SoO raids like Dragon Soul
+    _G.EJ_IsValidInstanceDifficulty = function(diffId)
+        if selected == 187 then
+            return diffId == 7 or diffId == 3 or diffId == 4 or diffId == 5 or diffId == 6
+        end
+        return diffId == 14 or diffId == 15 or diffId == 16 or diffId == 17
+    end
+    local ds = Catalog.GetValidDifficulties(187)
+    local hasLegacyLfr = false
+    for _, d in ipairs(ds) do if d == 7 then hasLegacyLfr = true end end
+    assert_eq(hasLegacyLfr, true, "ValidDiff: Dragon Soul includes legacy LFR (7)")
+    assert_eq(Catalog.GetDifficultyLabel(7), ns.L["DIFF_LFR"], "ValidDiff: diff 7 labeled as LFR/СПР")
 end
 
 ----------------------------------------------------------------
@@ -1919,6 +2041,263 @@ do
     local pending = Mounts._GetPendingItemIds()
     assert_eq(pending[222], true, "MountsLoop: item 222 pending exactly once (deduped)")
     stub.flushTimers()
+end
+
+----------------------------------------------------------------
+-- Shared lockout difficulties: only Blizzard toggleDifficultyID
+----------------------------------------------------------------
+do
+    local ns = freshNs()
+    local Catalog = ns.Catalog
+    local Data = ns.Data
+    local DB = ns.DB
+
+    -- Flexible N/H/M/LFR are independent (Blizzard toggleDifficultyID == 0; Lua 0 is truthy).
+    local sharedNH = Catalog.GetSharedLockoutDifficulties(14)
+    assert_eq(#sharedNH, 0, "Shared: Normal (14) is independent (toggle=0 → empty)")
+    local sharedHN = Catalog.GetSharedLockoutDifficulties(15)
+    assert_eq(#sharedHN, 0, "Shared: Heroic (15) is independent")
+
+    local shared10 = Catalog.GetSharedLockoutDifficulties(3)
+    assert_eq(shared10[1], 5, "Shared: 10N ↔ 10H via toggleDifficultyID")
+    local shared25 = Catalog.GetSharedLockoutDifficulties(6)
+    assert_eq(shared25[1], 4, "Shared: 25H ↔ 25N via toggleDifficultyID")
+    local shared25n = Catalog.GetSharedLockoutDifficulties(4)
+    assert_eq(shared25n[1], 6, "Shared: 25N ↔ 25H via toggleDifficultyID")
+
+    local sharedLfr = Catalog.GetSharedLockoutDifficulties(17)
+    assert_eq(#sharedLfr, 0, "Shared: LFR is independent")
+    local sharedMythic = Catalog.GetSharedLockoutDifficulties(16)
+    assert_eq(#sharedMythic, 0, "Shared: Mythic is independent")
+    local sharedLegacyLfr = Catalog.GetSharedLockoutDifficulties(7)
+    assert_eq(#sharedLegacyLfr, 0, "Shared: legacy LFR is independent")
+
+    local guid = "Player-1-BLOCKED"
+    DB.EnsureCharacter(guid)
+    local now = time()
+    -- Heroic (15) must NOT block Normal (14) — loot-based independent lockouts (SoO+).
+    DB.SetLockouts(guid, {
+        [DB.LockoutKey(187, 15)] = {
+            instanceId = 187,
+            difficultyId = 15,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 8,
+            encounterProgress = 3,
+            bosses = {
+                { name = "Morchok", killed = true },
+                { name = "Zon'ozz", killed = true },
+                { name = "Yor'sahj", killed = true },
+                { name = "Hagara", killed = false },
+            },
+        },
+    })
+
+    local statusH, pH, tH = Data.GetLockoutStatus(guid, 187, 15)
+    assert_eq(statusH, "progress", "Blocked: Heroic shows progress")
+    assert_eq(pH, 3, "Blocked: Heroic progress count")
+
+    local statusN = Data.GetLockoutStatus(guid, 187, 14)
+    assert_eq(statusN, "free", "Blocked: Normal stays free when only Heroic locked")
+
+    local statusM = Data.GetLockoutStatus(guid, 187, 16)
+    assert_eq(statusM, "free", "Blocked: Mythic remains free")
+
+    local statusLfr = Data.GetLockoutStatus(guid, 187, 17)
+    assert_eq(statusLfr, "free", "Blocked: LFR remains free")
+
+    -- Legacy 10N blocks 10H
+    local guid2 = "Player-1-LEGACY"
+    DB.EnsureCharacter(guid2)
+    DB.SetLockouts(guid2, {
+        [DB.LockoutKey(758, 3)] = {
+            instanceId = 758,
+            difficultyId = 3,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 12,
+            encounterProgress = 1,
+            bosses = { { name = "Lord Marrowgar", killed = true } },
+        },
+    })
+    local st10h, _, _, by10 = Data.GetLockoutStatus(guid2, 758, 5)
+    assert_eq(st10h, "blocked", "Blocked: 10H blocked by 10N")
+    assert_eq(by10, 3, "Blocked: blocker is 10N")
+    local st25 = Data.GetLockoutStatus(guid2, 758, 4)
+    assert_eq(st25, "free", "Blocked: 25N not blocked by 10N")
+
+    -- Legacy 10H blocks 10N (symmetric)
+    local guid10h = "Player-1-LEGACY-10H"
+    DB.EnsureCharacter(guid10h)
+    DB.SetLockouts(guid10h, {
+        [DB.LockoutKey(758, 5)] = {
+            instanceId = 758,
+            difficultyId = 5,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 12,
+            encounterProgress = 2,
+            bosses = {
+                { name = "Lord Marrowgar", killed = true },
+                { name = "Lady Deathwhisper", killed = true },
+            },
+        },
+    })
+    local st10n, _, _, by10h = Data.GetLockoutStatus(guid10h, 758, 3)
+    assert_eq(st10n, "blocked", "Blocked: 10N blocked by 10H")
+    assert_eq(by10h, 5, "Blocked: blocker is 10H")
+
+    -- Legacy 25N ↔ 25H symmetric (4 ↔ 6)
+    local guid25n = "Player-1-LEGACY-25N"
+    DB.EnsureCharacter(guid25n)
+    DB.SetLockouts(guid25n, {
+        [DB.LockoutKey(758, 4)] = {
+            instanceId = 758,
+            difficultyId = 4,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 12,
+            encounterProgress = 1,
+            bosses = { { name = "Lord Marrowgar", killed = true } },
+        },
+    })
+    local st25h, _, _, by25n = Data.GetLockoutStatus(guid25n, 758, 6)
+    assert_eq(st25h, "blocked", "Blocked: 25H blocked by 25N")
+    assert_eq(by25n, 4, "Blocked: blocker is 25N")
+    assert_eq(select(1, Data.GetLockoutStatus(guid25n, 758, 3)), "free",
+        "Blocked: 10N not blocked by 25N")
+
+    local guid25h = "Player-1-LEGACY-25H"
+    DB.EnsureCharacter(guid25h)
+    DB.SetLockouts(guid25h, {
+        [DB.LockoutKey(758, 6)] = {
+            instanceId = 758,
+            difficultyId = 6,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 12,
+            encounterProgress = 3,
+            bosses = {
+                { name = "Lord Marrowgar", killed = true },
+                { name = "Lady Deathwhisper", killed = true },
+                { name = "Gunship Battle", killed = true },
+            },
+        },
+    })
+    local st25n, _, _, by25h = Data.GetLockoutStatus(guid25h, 758, 4)
+    assert_eq(st25n, "blocked", "Blocked: 25N blocked by 25H")
+    assert_eq(by25h, 6, "Blocked: blocker is 25H")
+
+    -- Debug dump includes toggle / blocks sections
+    local lines = Data.DumpDebugLockouts(true)
+    local blob = table.concat(lines, "\n")
+    assert_true(blob:find("Shared lockouts", 1, true) ~= nil, "DumpDebug: shared lockouts section")
+    assert_true(blob:find("toggle=", 1, true) ~= nil, "DumpDebug: shows toggleDifficultyID")
+    assert_true(blob:find("independent", 1, true) ~= nil, "DumpDebug: marks independent diffs")
+end
+
+----------------------------------------------------------------
+-- RemapDifficultyLockouts: collision keeps the stronger lockout
+----------------------------------------------------------------
+do
+    local ns = freshNs()
+    local DB = ns.DB
+    local Data = ns.Data
+    local now = time()
+    local guid = "Player-1-REMAP"
+    DB.EnsureCharacter(guid)
+
+    local fromKey = DB.LockoutKey(557, 900001)
+    local toKey = DB.LockoutKey(557, 1262)
+    DB.SetLockouts(guid, {
+        [fromKey] = {
+            instanceId = 557,
+            difficultyId = 900001,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 4,
+            encounterProgress = 3,
+            bosses = {
+                { name = "Boss A", killed = true },
+                { name = "Boss B", killed = true },
+                { name = "Boss C", killed = true },
+                { name = "Boss D", killed = false },
+            },
+        },
+        [toKey] = {
+            instanceId = 557,
+            difficultyId = 1262,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now - 100,
+            numEncounters = 4,
+            encounterProgress = 1,
+            bosses = {
+                { name = "Boss A", killed = true },
+                { name = "Boss B", killed = false },
+                { name = "Boss C", killed = false },
+                { name = "Boss D", killed = false },
+            },
+        },
+    })
+
+    local changed = DB.RemapDifficultyLockouts(557, 900001, 1262)
+    assert_eq(changed, 1, "Remap: remapped one character")
+    local char = DB.GetCharacter(guid)
+    assert_eq(char.lockouts[fromKey], nil, "Remap: fromKey removed")
+    local kept = char.lockouts[toKey]
+    assert_true(kept ~= nil, "Remap: toKey present")
+    local kills = Data.CountKilledBosses(kept)
+    assert_eq(kills, 3, "Remap: collision keeps richer from-key lockout (3 kills)")
+    assert_eq(kept.difficultyId, 1262, "Remap: winner has toDifficultyId")
+
+    -- Weak from + strong to: keep to
+    local guid2 = "Player-1-REMAP2"
+    DB.EnsureCharacter(guid2)
+    DB.SetLockouts(guid2, {
+        [fromKey] = {
+            instanceId = 557,
+            difficultyId = 900001,
+            locked = true,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 4,
+            encounterProgress = 0,
+            bosses = {
+                { name = "A", killed = false },
+                { name = "B", killed = false },
+            },
+        },
+        [toKey] = {
+            instanceId = 557,
+            difficultyId = 1262,
+            locked = true,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 4,
+            encounterProgress = 2,
+            bosses = {
+                { name = "A", killed = true },
+                { name = "B", killed = true },
+            },
+        },
+    })
+    DB.RemapDifficultyLockouts(557, 900001, 1262)
+    local kept2 = DB.GetCharacter(guid2).lockouts[toKey]
+    assert_eq(Data.CountKilledBosses(kept2), 2, "Remap: collision keeps stronger to-key lockout")
 end
 
 ----------------------------------------------------------------

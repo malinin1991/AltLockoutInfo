@@ -634,21 +634,31 @@ end
 
 --- Apply static world-boss boss names / synthetic encounter ids from MountsSupplement.
 --- mutateCatalog: when true, also append ids onto raid.difficulties (Catalog.Build only).
+--- When EJ already lists the same boss by name, reuse that encounter id (no Rukhmar×2).
 local function ApplyStaticWorldBossEntry(entry, raid, mutateCatalog)
-    local L = ns.L
     local encDiffs = entry.difficulties
     if type(encDiffs) ~= "table" or #encDiffs == 0 then
         return
     end
-    local bossName = (entry.bossLocaleKey and L and L[entry.bossLocaleKey])
-        or entry.bossName
+    local bossNames = Catalog.BossNameCandidates and Catalog.BossNameCandidates(entry) or {}
+    local label = bossNames[1]
     for _, encId in ipairs(encDiffs) do
-        if bossName and Catalog.SetEncounterLabel then
-            Catalog.SetEncounterLabel(encId, bossName)
+        local resolved = encId
+        if raid and Catalog.FindEncounterIdByName then
+            for _, bn in ipairs(bossNames) do
+                local existing = Catalog.FindEncounterIdByName(raid, bn)
+                if existing then
+                    resolved = existing
+                    break
+                end
+            end
+        end
+        if label and Catalog.SetEncounterLabel then
+            Catalog.SetEncounterLabel(resolved, label)
         end
         -- Never mutate the live catalog during MergeSupplement / UI — that changes
         -- TiersFingerprint and kicks a second mounts scan after the first finishes.
-        if mutateCatalog and raid and type(raid.difficulties) == "table" then
+        if mutateCatalog and raid and type(raid.difficulties) == "table" and resolved == encId then
             local have = false
             for _, d in ipairs(raid.difficulties) do
                 if d == encId then
@@ -661,6 +671,34 @@ local function ApplyStaticWorldBossEntry(entry, raid, mutateCatalog)
             end
         end
     end
+end
+
+--- Encounter ids to use for a WB supplement entry (real EJ id when name matches).
+local function SupplementEncounterIds(entry, raid)
+    local encDiffs = entry.difficulties
+    if type(encDiffs) ~= "table" then
+        return {}
+    end
+    local bossNames = Catalog.BossNameCandidates and Catalog.BossNameCandidates(entry) or {}
+    local out = {}
+    local seen = {}
+    for _, encId in ipairs(encDiffs) do
+        local resolved = encId
+        if raid and Catalog.FindEncounterIdByName then
+            for _, bn in ipairs(bossNames) do
+                local existing = Catalog.FindEncounterIdByName(raid, bn)
+                if existing then
+                    resolved = existing
+                    break
+                end
+            end
+        end
+        if not seen[resolved] then
+            seen[resolved] = true
+            out[#out + 1] = resolved
+        end
+    end
+    return out
 end
 
 --- Tracking diffs for a mount row: scanned diffs, else static supplement, else catalog WB.
@@ -688,11 +726,7 @@ function Mounts.GetTrackingDiffs(row)
             if entry.itemID == row.itemID and type(entry.difficulties) == "table" and #entry.difficulties > 0 then
                 local _, raid = FindRaidInCatalog(entry.journalInstanceId, entry.mapId)
                 ApplyStaticWorldBossEntry(entry, raid)
-                local out = {}
-                for i, d in ipairs(entry.difficulties) do
-                    out[i] = d
-                end
-                return out
+                return SupplementEncounterIds(entry, raid)
             end
         end
     end
@@ -729,7 +763,7 @@ function Mounts.MergeSupplement(byKey)
                     local before = byKey[key]
                     if RaidIsWorldBoss(raid) then
                         ApplyStaticWorldBossEntry(entry, raid, false)
-                        local encDiffs = entry.difficulties
+                        local encDiffs = SupplementEncounterIds(entry, raid)
                         if type(encDiffs) == "table" and #encDiffs > 0 then
                             for _, encId in ipairs(encDiffs) do
                                 Mounts.AddLootHit(byKey, {

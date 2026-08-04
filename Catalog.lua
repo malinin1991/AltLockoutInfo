@@ -5,17 +5,20 @@ local Catalog = ns.Catalog
 local DB = ns.DB
 local L = ns.L
 
--- Standard modern raid difficulties + legacy 10/25 where applicable
+-- Standard modern raid difficulties + legacy 10/25 where applicable.
+-- Difficulty 7 = Looking For Raid for pre-SoO raids (Dragon Soul, MoP except SoO).
+-- Difficulty 17 = Looking For Raid for SoO and all later raids.
 Catalog.STANDARD_DIFFICULTIES = { 17, 14, 15, 16 } -- LFR, Normal, Heroic, Mythic
-Catalog.LEGACY_DIFFICULTIES = { 3, 4, 5, 6, 9 }    -- 10N, 25N, 10H, 25H, 40
-Catalog.ALL_DIFFICULTIES = { 17, 14, 15, 16, 3, 4, 5, 6, 9 }
+Catalog.LEGACY_DIFFICULTIES = { 7, 3, 4, 5, 6, 9 } -- Legacy LFR, 10N, 25N, 10H, 25H, 40
+Catalog.ALL_DIFFICULTIES = { 7, 17, 14, 15, 16, 3, 4, 5, 6, 9 }
 
 local DIFF_ORDER = {
     [3] = 1, [4] = 2, [5] = 3, [6] = 4, [9] = 5,
-    [17] = 6, [14] = 7, [15] = 8, [16] = 9,
+    [7] = 6, [17] = 7, [14] = 8, [15] = 9, [16] = 10,
 }
 
 local DIFF_LOCALE_KEYS = {
+    [7] = "DIFF_LFR",
     [17] = "DIFF_LFR",
     [14] = "DIFF_NORMAL",
     [15] = "DIFF_HEROIC",
@@ -109,6 +112,93 @@ function Catalog.IsRaidDifficultyId(diffId)
     end
     -- Known retail/legacy difficulty range; journal encounter IDs are much larger.
     return id >= 1 and id <= 50
+end
+
+--- Other difficulty IDs that share an instance lockout with this one (empty if independent).
+--- Per Blizzard: only GetDifficultyInfo toggleDifficultyID (legacy 10/25 N↔H: 3↔5, 4↔6).
+--- Flexible Normal/Heroic (14/15), Mythic (16), LFR (7/17) are independent lockouts.
+function Catalog.GetSharedLockoutDifficulties(diffId)
+    local id = tonumber(diffId)
+    if not id then
+        return {}
+    end
+    if not GetDifficultyInfo then
+        return {}
+    end
+    -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
+    -- Blizzard returns 0 when there is no partner; Lua treats 0 as truthy, so reject 0 explicitly.
+    local toggle = tonumber(select(7, GetDifficultyInfo(id)))
+    if toggle and toggle ~= 0 and toggle ~= id then
+        return { toggle }
+    end
+    return {}
+end
+
+--- Find an encounter id already listed on a raid whose label matches bossName.
+function Catalog.FindEncounterIdByName(raid, bossName)
+    if type(raid) ~= "table" or type(bossName) ~= "string" or bossName == "" then
+        return nil
+    end
+    local lower = string.lower(bossName)
+    for _, encId in ipairs(raid.difficulties or {}) do
+        local encName = Catalog.GetEncounterLabel(encId)
+        if encName and string.lower(encName) == lower then
+            return encId
+        end
+    end
+    return nil
+end
+
+--- Non-nil locale / EN boss name candidates for a MountsSupplement entry (no array holes).
+function Catalog.BossNameCandidates(entry)
+    local names = {}
+    if type(entry) ~= "table" then
+        return names
+    end
+    local L = ns.L
+    local localeName = entry.bossLocaleKey and L and L[entry.bossLocaleKey]
+    if type(localeName) == "string" and localeName ~= "" then
+        names[#names + 1] = localeName
+    end
+    if type(entry.bossName) == "string" and entry.bossName ~= "" then
+        local lower = string.lower(entry.bossName)
+        local dup = false
+        for i = 1, #names do
+            if string.lower(names[i]) == lower then
+                dup = true
+                break
+            end
+        end
+        if not dup then
+            names[#names + 1] = entry.bossName
+        end
+    end
+    return names
+end
+
+--- Map a synthetic / supplement encounter id onto a real EJ encounter when names match.
+function Catalog.ResolveSupplementEncounterId(raid, syntheticId, bossName)
+    local existing = Catalog.FindEncounterIdByName(raid, bossName)
+    if existing then
+        return existing
+    end
+    return syntheticId
+end
+
+--- Migrate tracked checkboxes + saved lockouts when synthetic encounter id → real EJ id.
+function Catalog.MigrateSupplementEncounterId(instanceId, fromEncId, toEncId)
+    if not instanceId or fromEncId == nil or toEncId == nil or fromEncId == toEncId then
+        return
+    end
+    if DB and DB.IsTracked and DB.SetTracked then
+        if DB.IsTracked(instanceId, fromEncId) then
+            DB.SetTracked(instanceId, toEncId, true)
+            DB.SetTracked(instanceId, fromEncId, false)
+        end
+    end
+    if DB and DB.RemapDifficultyLockouts then
+        DB.RemapDifficultyLockouts(instanceId, fromEncId, toEncId)
+    end
 end
 
 function Catalog.SetEncounterLabel(encounterId, name)
@@ -378,29 +468,41 @@ function Catalog.Build()
 
     -- Pin static WB supplement encounters (e.g. Rukhmar) before fingerprint commit
     -- so MergeSupplement cannot change the tree mid/after a mounts scan.
+    -- Skip synthetic ids when EJ already exposed the same boss by name (avoids Rukhmar×2).
     if type(ns.MountsSupplement) == "table" then
-        local L = ns.L
         for _, entry in ipairs(ns.MountsSupplement) do
             if entry.journalInstanceId and type(entry.difficulties) == "table" then
                 for _, tier in ipairs(tiers) do
                     for _, raid in ipairs(tier.raids or {}) do
                         if raid.instanceId == entry.journalInstanceId and raid.isWorldBoss then
-                            local bossName = (entry.bossLocaleKey and L and L[entry.bossLocaleKey])
-                                or entry.bossName
+                            local bossNames = Catalog.BossNameCandidates(entry)
+                            local label = bossNames[1]
                             for _, encId in ipairs(entry.difficulties) do
-                                if bossName then
-                                    Catalog.SetEncounterLabel(encId, bossName)
-                                end
-                                local have = false
-                                for _, d in ipairs(raid.difficulties or {}) do
-                                    if d == encId then
-                                        have = true
+                                local resolved = encId
+                                for _, bn in ipairs(bossNames) do
+                                    local existing = Catalog.FindEncounterIdByName(raid, bn)
+                                    if existing then
+                                        resolved = existing
                                         break
                                     end
                                 end
-                                if not have then
-                                    raid.difficulties = raid.difficulties or {}
-                                    raid.difficulties[#raid.difficulties + 1] = encId
+                                if label then
+                                    Catalog.SetEncounterLabel(resolved, label)
+                                end
+                                -- Migrate tracked + saved lockouts from synthetic id → real EJ id.
+                                Catalog.MigrateSupplementEncounterId(raid.instanceId, encId, resolved)
+                                if resolved == encId then
+                                    local have = false
+                                    for _, d in ipairs(raid.difficulties or {}) do
+                                        if d == encId then
+                                            have = true
+                                            break
+                                        end
+                                    end
+                                    if not have then
+                                        raid.difficulties = raid.difficulties or {}
+                                        raid.difficulties[#raid.difficulties + 1] = encId
+                                    end
                                 end
                             end
                         end
@@ -627,23 +729,19 @@ function Catalog.ResolveWorldBossLockout(savedName, savedInstanceId)
     end
 
     -- Static MountsSupplement aliases (Rukhmar костыль etc.): match EN/locale boss names.
+    -- Prefer a real EJ encounter already on the raid over the synthetic supplement id.
     if lower and type(ns.MountsSupplement) == "table" then
-        local L = ns.L
         for _, entry in ipairs(ns.MountsSupplement) do
             if type(entry.difficulties) == "table" and entry.difficulties[1] then
-                local names = {
-                    entry.bossName,
-                    entry.bossLocaleKey and L and L[entry.bossLocaleKey] or nil,
-                }
+                local names = Catalog.BossNameCandidates(entry)
                 for _, n in ipairs(names) do
-                    if type(n) == "string" and string.lower(n) == lower then
+                    if string.lower(n) == lower then
                         local jid = entry.journalInstanceId
                         if jid then
-                            local encId = entry.difficulties[1]
-                            if entry.bossLocaleKey and L and L[entry.bossLocaleKey] then
-                                Catalog.SetEncounterLabel(encId, L[entry.bossLocaleKey])
-                            elseif entry.bossName then
-                                Catalog.SetEncounterLabel(encId, entry.bossName)
+                            local raid = Catalog.GetRaidByInstanceId(jid)
+                            local encId = Catalog.ResolveSupplementEncounterId(raid, entry.difficulties[1], n)
+                            if names[1] then
+                                Catalog.SetEncounterLabel(encId, names[1])
                             end
                             return jid, encId
                         end

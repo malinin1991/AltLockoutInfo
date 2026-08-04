@@ -350,6 +350,9 @@ local function BuildRaidsTab(y, width)
                         end
                     end
 
+                    local isWB = raid.isWorldBoss == true
+                        or (Catalog.IsWorldBossInstance and Catalog.IsWorldBossInstance(raid))
+
                     local raidCb = MakeCheckbox(content, function(checked)
                         DB.SetRaidTracked(raid.instanceId, diffs, checked)
                         UI.Refresh()
@@ -358,34 +361,75 @@ local function BuildRaidsTab(y, width)
                     raidCb:SetPoint("TOPLEFT", 20, y)
                     raidCb:SetChecked(allOn)
 
-                    local raidNameFS = AcquireFont(content, "GameFontHighlightSmall")
-                    raidNameFS:SetPoint("LEFT", raidCb, "RIGHT", 4, 0)
-                    raidNameFS:SetSize(RAID_NAME_W, ROW_H)
-                    raidNameFS:SetJustifyH("LEFT")
-                    raidNameFS:SetJustifyV("MIDDLE")
-                    raidNameFS:SetText(raid.name or "?")
+                    if isWB then
+                        -- Collapsible vertical boss list — avoids horizontal overflow.
+                        local wbCollapsed = DB.IsWorldBossOptionsCollapsed
+                            and DB.IsWorldBossOptionsCollapsed(raid.instanceId)
+                        local arrow = wbCollapsed and (L["COLLAPSED"] or ">") or (L["EXPANDED"] or "v")
+                        local instanceId = raid.instanceId
+                        local raidToggle = MakeToggleRow(content,
+                            string.format("%s %s", arrow, raid.name or "?"),
+                            RAID_NAME_W + 40, ROW_H,
+                            function()
+                                if DB.SetWorldBossOptionsCollapsed then
+                                    DB.SetWorldBossOptionsCollapsed(instanceId,
+                                        not DB.IsWorldBossOptionsCollapsed(instanceId))
+                                end
+                                UI.Refresh()
+                            end)
+                        raidToggle:SetPoint("LEFT", raidCb, "RIGHT", 4, 0)
+                        y = y - ROW_H
 
-                    local dx = 28 + 24 + RAID_NAME_W
-                    for _, diffId in ipairs(diffs) do
-                        local dCb = MakeCheckbox(content, function(checked)
-                            DB.SetTracked(raid.instanceId, diffId, checked)
-                            RefreshMainIfOpen()
-                            UI.Refresh()
-                        end)
-                        dCb:SetPoint("TOPLEFT", dx, y)
-                        dCb:SetChecked(DB.IsTracked(raid.instanceId, diffId))
+                        if not wbCollapsed then
+                            for _, diffId in ipairs(diffs) do
+                                local dCb = MakeCheckbox(content, function(checked)
+                                    DB.SetTracked(raid.instanceId, diffId, checked)
+                                    RefreshMainIfOpen()
+                                    UI.Refresh()
+                                end)
+                                dCb:SetPoint("TOPLEFT", 44, y)
+                                dCb:SetChecked(DB.IsTracked(raid.instanceId, diffId))
 
-                        local dFS = AcquireFont(content, "GameFontHighlightSmall")
-                        dFS:SetPoint("LEFT", dCb, "RIGHT", 1, 0)
-                        dFS:SetSize(DIFF_COL_W - 26, ROW_H)
-                        dFS:SetJustifyH("LEFT")
-                        dFS:SetJustifyV("MIDDLE")
-                        dFS:SetText(Catalog.GetDifficultyLabel(diffId))
-                        dFS:SetTextColor(1, 1, 1)
+                                local dFS = AcquireFont(content, "GameFontHighlightSmall")
+                                dFS:SetPoint("LEFT", dCb, "RIGHT", 4, 0)
+                                dFS:SetSize(width - 80, ROW_H)
+                                dFS:SetJustifyH("LEFT")
+                                dFS:SetJustifyV("MIDDLE")
+                                dFS:SetText(Catalog.GetDifficultyLabel(diffId))
+                                dFS:SetTextColor(1, 1, 1)
+                                y = y - ROW_H
+                            end
+                        end
+                    else
+                        local raidNameFS = AcquireFont(content, "GameFontHighlightSmall")
+                        raidNameFS:SetPoint("LEFT", raidCb, "RIGHT", 4, 0)
+                        raidNameFS:SetSize(RAID_NAME_W, ROW_H)
+                        raidNameFS:SetJustifyH("LEFT")
+                        raidNameFS:SetJustifyV("MIDDLE")
+                        raidNameFS:SetText(raid.name or "?")
 
-                        dx = dx + DIFF_COL_W
+                        local dx = 28 + 24 + RAID_NAME_W
+                        for _, diffId in ipairs(diffs) do
+                            local dCb = MakeCheckbox(content, function(checked)
+                                DB.SetTracked(raid.instanceId, diffId, checked)
+                                RefreshMainIfOpen()
+                                UI.Refresh()
+                            end)
+                            dCb:SetPoint("TOPLEFT", dx, y)
+                            dCb:SetChecked(DB.IsTracked(raid.instanceId, diffId))
+
+                            local dFS = AcquireFont(content, "GameFontHighlightSmall")
+                            dFS:SetPoint("LEFT", dCb, "RIGHT", 1, 0)
+                            dFS:SetSize(DIFF_COL_W - 26, ROW_H)
+                            dFS:SetJustifyH("LEFT")
+                            dFS:SetJustifyV("MIDDLE")
+                            dFS:SetText(Catalog.GetDifficultyLabel(diffId))
+                            dFS:SetTextColor(1, 1, 1)
+
+                            dx = dx + DIFF_COL_W
+                        end
+                        y = y - ROW_H
                     end
-                    y = y - ROW_H
                 end
             end
             y = y - 6

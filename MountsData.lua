@@ -2,7 +2,8 @@ local addonName, ns = ...
 
 --- Static supplement for raid mounts that Encounter Journal loot often omits.
 --- Keys use journal instanceId when known; mapId is a fallback matched via Catalog.
---- difficulties: DifficultyIDs where the mount can drop (legacy 3/4/5/6/9 + modern 14/15/16/17).
+--- difficulties: DifficultyIDs where the mount can drop (legacy 3/4/5/6/7/9 + modern 14/15/16/17).
+--- Difficulty 7 = Looking For Raid for pre-SoO raids; 17 = LFR for SoO and later.
 ns.MountsSupplement = {
     -- Wrath of the Lich King
     -- Invincible's Reins — The Lich King, Icecrown Citadel 25 Heroic only

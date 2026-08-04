@@ -32,6 +32,8 @@ local COLORS = {
     progress = { 1.0, 0.82, 0.2 },
     complete = { 0.85, 0.25, 0.25 },
     empty = { 0.55, 0.55, 0.55 },
+    -- Cooler slate grey so "—" blocked is distinct from unknown/NO_DATA empty grey.
+    blocked = { 0.42, 0.48, 0.58 },
     header = { 1, 0.82, 0 },
     raid = { 0.9, 0.9, 1 },
 }
@@ -128,6 +130,9 @@ local function FormatCell(status, progress, total)
     if status == "disabled" or status == "unknown" then
         return L["NO_DATA"], COLORS.empty
     end
+    if status == "blocked" then
+        return L["BLOCKED_CELL"] or "—", COLORS.blocked
+    end
     if status == "free" then
         return L["FREE"], COLORS.free
     end
@@ -173,6 +178,26 @@ local function ShowCellTooltip(owner, guid, instanceId, diffId, raidName)
         return
     end
 
+    local status, progress, total, blockedBy = Data.GetLockoutStatus(guid, instanceId, diffId)
+    if status == "blocked" then
+        local blockerLabel = Catalog.GetDifficultyLabel(blockedBy) or tostring(blockedBy)
+        GameTooltip:AddLine(string.format(L["TOOLTIP_BLOCKED"] or "Blocked by %s", blockerLabel), 0.7, 0.7, 0.7)
+        GameTooltip:AddLine(L["TOOLTIP_BLOCKED_HINT"] or "This difficulty shares a lockout with another difficulty.", 0.55, 0.55, 0.55, true)
+        local otherLo = Data.GetEffectiveLockout(guid, instanceId, blockedBy)
+        if otherLo then
+            local left = math.max(0, (tonumber(otherLo.resetAt) or 0) - time())
+            if left > 0 then
+                GameTooltip:AddLine(string.format(L["TOOLTIP_RESET"], Data.FormatDuration(left)), 0.8, 0.8, 0.8)
+            end
+            local kills, encTotal = Data.CountKilledBosses(otherLo)
+            if encTotal and encTotal > 0 then
+                GameTooltip:AddLine(string.format(L["PROGRESS"], kills, encTotal), 1, 0.82, 0.2)
+            end
+        end
+        GameTooltip:Show()
+        return
+    end
+
     local lo = DB.GetLockout(guid, instanceId, diffId)
     if not lo or Data.IsLockoutExpired(lo) or (not lo.locked and not lo.extended) then
         GameTooltip:AddLine(L["FREE"], 0.2, 0.85, 0.3)
@@ -185,8 +210,8 @@ local function ShowCellTooltip(owner, guid, instanceId, diffId, raidName)
 
     local left = math.max(0, (tonumber(lo.resetAt) or 0) - time())
     GameTooltip:AddLine(string.format(L["TOOLTIP_RESET"], Data.FormatDuration(left)), 0.8, 0.8, 0.8)
-    local kills, total = Data.CountKilledBosses(lo)
-    GameTooltip:AddLine(string.format(L["PROGRESS"], kills, total), 1, 0.82, 0.2)
+    local kills, encTotal = Data.CountKilledBosses(lo)
+    GameTooltip:AddLine(string.format(L["PROGRESS"], kills, encTotal), 1, 0.82, 0.2)
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine(L["TOOLTIP_BOSSES"], 1, 1, 1)
     if type(lo.bosses) == "table" and #lo.bosses > 0 then

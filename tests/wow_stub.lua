@@ -35,7 +35,34 @@ function M.reset()
     _G.GetLocale = function() return "enUS" end
     _G.GetNormalizedRealmName = function() return "TestRealm" end
     _G.GetRealmName = function() return "TestRealm" end
-    _G.GetDifficultyInfo = function(id) return "Diff" .. tostring(id) end
+    _G.GetDifficultyInfo = function(id)
+        local names = {
+            [3] = "10 Player",
+            [4] = "25 Player",
+            [5] = "10 Player (Heroic)",
+            [6] = "25 Player (Heroic)",
+            [7] = "Looking For Raid",
+            [9] = "40 Player",
+            [14] = "Normal",
+            [15] = "Heroic",
+            [16] = "Mythic",
+            [17] = "Looking For Raid",
+        }
+        -- Blizzard returns 0 (not nil) when there is no toggle partner; Lua treats 0 as truthy.
+        local toggles = {
+            [3] = 5,
+            [5] = 3,
+            [4] = 6,
+            [6] = 4,
+            [7] = 0,
+            [14] = 0,
+            [15] = 0,
+            [16] = 0,
+            [17] = 0,
+        }
+        -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
+        return names[id] or ("Diff" .. tostring(id)), "raid", false, false, false, false, toggles[id] or 0
+    end
     _G.UnitGUID = function() return "Player-1-00000001" end
     _G.UnitClass = function() return "Priest", "PRIEST" end
     _G.UnitFullName = function() return "Testchar", "TestRealm" end

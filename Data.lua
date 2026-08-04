@@ -124,8 +124,8 @@ function Data.CountKilledBosses(lockout)
 end
 
 --- Compute cell status for the status matrix.
---- Returns: status, progress, total
---- status: "disabled"|"unknown"|"free"|"complete"|"progress"
+--- Returns: status, progress, total [, blockedByDiffId]
+--- status: "disabled"|"unknown"|"free"|"complete"|"progress"|"blocked"
 function Data.GetLockoutStatus(guid, instanceId, difficultyId)
     if DB.IsCharacterRaidDisabled(guid, instanceId) then
         return "disabled", 0, 0
@@ -134,20 +134,27 @@ function Data.GetLockoutStatus(guid, instanceId, difficultyId)
         return "unknown", 0, 0
     end
     local lo = Data.GetEffectiveLockout(guid, instanceId, difficultyId)
-    if not lo then
-        return "free", 0, 0
-    end
-    local progress, total = Data.CountKilledBosses(lo)
-    if total > 0 and progress >= total then
-        return "complete", progress, total
-    end
-    if total > 0 and progress > 0 then
-        return "progress", progress, total
-    end
-    if Data.IsTruthyFlag(lo.locked) or Data.IsTruthyFlag(lo.extended) then
-        -- Locked but 0 kills yet (or boss list empty) — still show as in-progress.
+    if lo then
+        -- GetEffectiveLockout already requires locked/extended and non-expired.
+        local progress, total = Data.CountKilledBosses(lo)
+        if total > 0 and progress >= total then
+            return "complete", progress, total
+        end
+        -- Locked with partial or zero kills (or empty boss list) — show as in-progress.
         -- Do not invent total=1 when numEncounters is unknown.
         return "progress", progress, total
+    end
+
+    -- No direct lockout: check difficulties linked via GetDifficultyInfo.toggleDifficultyID
+    -- (legacy 10N↔10H, 25N↔25H). Flexible N/H/M/LFR are independent.
+    if ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties then
+        local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId)
+        for _, otherId in ipairs(shared) do
+            local otherLo = Data.GetEffectiveLockout(guid, instanceId, otherId)
+            if otherLo then
+                return "blocked", 0, 0, otherId
+            end
+        end
     end
     return "free", 0, 0
 end
@@ -330,6 +337,31 @@ function Data.DumpDebugLockouts(skipRequest)
         RequestRaidInfo()
         add("RequestRaidInfo() called")
     end
+
+    -- Blizzard shared-lockout map: only toggleDifficultyID pairs (legacy 10/25 N↔H).
+    add("--- Shared lockouts (GetDifficultyInfo.toggleDifficultyID) ---")
+    local dumpDiffs = { 3, 4, 5, 6, 7, 9, 14, 15, 16, 17 }
+    if GetDifficultyInfo then
+        for _, diffId in ipairs(dumpDiffs) do
+            local name, _, isHeroic, _, _, _, toggle = GetDifficultyInfo(diffId)
+            local shared = (ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
+                and ns.Catalog.GetSharedLockoutDifficulties(diffId)) or {}
+            if toggle and tonumber(toggle) and tonumber(toggle) ~= 0 then
+                add("  diff %s (%s) heroic=%s toggle=%s → blocks {%s}",
+                    tostring(diffId),
+                    tostring(name),
+                    tostring(isHeroic),
+                    tostring(toggle),
+                    table.concat(shared, ","))
+            else
+                add("  diff %s (%s) independent (no toggle)",
+                    tostring(diffId), tostring(name))
+            end
+        end
+    else
+        add("  GetDifficultyInfo unavailable")
+    end
+
     local num = GetNumSavedInstances and GetNumSavedInstances() or 0
     add("GetNumSavedInstances = %d", num)
     for i = 1, num do
@@ -364,9 +396,26 @@ function Data.DumpDebugLockouts(skipRequest)
                 tostring(extra))
         end
         add("  killedCount=%d / %d", kills, enc)
+        local jid = nil
         if ns.Catalog and ns.Catalog.ResolveJournalId then
-            local jid = ns.Catalog.ResolveJournalId(instanceId, name)
+            jid = ns.Catalog.ResolveJournalId(instanceId, name)
             add("  ResolveJournalId => %s", tostring(jid))
+        end
+        -- Which sibling difficulties this lockout would block (Blizzard toggle).
+        if active and ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties then
+            local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId)
+            if #shared > 0 then
+                local parts = {}
+                for _, otherId in ipairs(shared) do
+                    local label = ns.Catalog.GetDifficultyLabel
+                        and ns.Catalog.GetDifficultyLabel(otherId)
+                        or tostring(otherId)
+                    parts[#parts + 1] = string.format("%s (%s)", tostring(otherId), tostring(label))
+                end
+                add("  blocks difficulties: %s", table.concat(parts, ", "))
+            else
+                add("  blocks difficulties: (none — independent lockout)")
+            end
         end
     end
     local guid = UnitGUID and UnitGUID("player")
@@ -393,6 +442,23 @@ function Data.DumpDebugLockouts(skipRequest)
                     for bi, boss in ipairs(lo.bosses) do
                         add("    stored boss[%d] %s killed=%s",
                             bi, tostring(boss.name), tostring(Data.IsEncounterKilledFlag(boss.killed)))
+                    end
+                end
+                -- Inferred UI blocks for this stored lockout (toggle sibling).
+                local instId = lo.instanceId
+                local diffId = lo.difficultyId
+                if ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
+                    and Data.GetEffectiveLockout(guid, instId, diffId) then
+                    local shared = ns.Catalog.GetSharedLockoutDifficulties(diffId)
+                    for _, otherId in ipairs(shared) do
+                        local st, _, _, by = Data.GetLockoutStatus(guid, instId, otherId)
+                        if st == "blocked" then
+                            local label = ns.Catalog.GetDifficultyLabel
+                                and ns.Catalog.GetDifficultyLabel(otherId)
+                                or tostring(otherId)
+                            add("    → UI blocks %s (%s) via toggle (blocker=%s)",
+                                tostring(otherId), tostring(label), tostring(by))
+                        end
                     end
                 end
             end
