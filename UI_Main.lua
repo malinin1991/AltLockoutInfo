@@ -182,7 +182,17 @@ local function ShowCellTooltip(owner, guid, instanceId, diffId, raidName)
     if status == "blocked" then
         local blockerLabel = Catalog.GetDifficultyLabel(blockedBy) or tostring(blockedBy)
         GameTooltip:AddLine(string.format(L["TOOLTIP_BLOCKED"] or "Blocked by %s", blockerLabel), 0.7, 0.7, 0.7)
-        GameTooltip:AddLine(L["TOOLTIP_BLOCKED_HINT"] or "This difficulty shares a lockout with another difficulty.", 0.55, 0.55, 0.55, true)
+        local mode = Catalog.GetLockoutShareMode and Catalog.GetLockoutShareMode(instanceId)
+        local hint = L["TOOLTIP_BLOCKED_HINT"]
+            or "This difficulty shares a lockout with another difficulty."
+        if mode == Catalog.LOCKOUT_SHARE_UNIFIED then
+            hint = L["TOOLTIP_BLOCKED_HINT_UNIFIED"]
+                or "This raid shares one weekly lockout across non-LFR difficulties."
+        elseif mode == Catalog.LOCKOUT_SHARE_TOGGLE then
+            hint = L["TOOLTIP_BLOCKED_HINT_TOGGLE"]
+                or "Legacy 10/25 Normal and Heroic of the same size share one lockout."
+        end
+        GameTooltip:AddLine(hint, 0.55, 0.55, 0.55, true)
         local otherLo = Data.GetEffectiveLockout(guid, instanceId, blockedBy)
         if otherLo then
             local left = math.max(0, (tonumber(otherLo.resetAt) or 0) - time())

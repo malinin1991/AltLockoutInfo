@@ -145,10 +145,10 @@ function Data.GetLockoutStatus(guid, instanceId, difficultyId)
         return "progress", progress, total
     end
 
-    -- No direct lockout: check difficulties linked via GetDifficultyInfo.toggleDifficultyID
-    -- (legacy 10N↔10H, 25N↔25H). Flexible N/H/M/LFR are independent.
+    -- No direct lockout: check difficulties that share a lockout for this raid
+    -- (manual pre-SoO unified rules and/or toggleDifficultyID N↔H pairs).
     if ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties then
-        local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId)
+        local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId, instanceId)
         for _, otherId in ipairs(shared) do
             local otherLo = Data.GetEffectiveLockout(guid, instanceId, otherId)
             if otherLo then
@@ -338,8 +338,8 @@ function Data.DumpDebugLockouts(skipRequest)
         add("RequestRaidInfo() called")
     end
 
-    -- Blizzard shared-lockout map: only toggleDifficultyID pairs (legacy 10/25 N↔H).
-    add("--- Shared lockouts (GetDifficultyInfo.toggleDifficultyID) ---")
+    -- Blizzard toggle map + note about manual per-raid rules.
+    add("--- Shared lockouts (toggleDifficultyID + manual raid rules) ---")
     local dumpDiffs = { 3, 4, 5, 6, 7, 9, 14, 15, 16, 17 }
     if GetDifficultyInfo then
         for _, diffId in ipairs(dumpDiffs) do
@@ -349,23 +349,38 @@ function Data.DumpDebugLockouts(skipRequest)
                 add("  diff %s GetDifficultyInfo error: %s", tostring(diffId), tostring(name))
             else
                 local shared = (ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
-                    and ns.Catalog.GetSharedLockoutDifficulties(diffId)) or {}
+                    and ns.Catalog.GetSharedLockoutDifficulties(diffId, nil)) or {}
                 local toggleNum = tonumber(toggle)
                 if toggleNum and toggleNum ~= 0 then
-                    add("  diff %s (%s) heroic=%s toggle=%s -> blocks {%s}",
+                    add("  diff %s (%s) heroic=%s toggle=%s -> toggle-blocks {%s}",
                         tostring(diffId),
                         tostring(name),
                         tostring(isHeroic),
                         tostring(toggle),
                         table.concat(shared, ","))
                 else
-                    add("  diff %s (%s) independent (no toggle)",
+                    add("  diff %s (%s) independent toggle (no partner)",
                         tostring(diffId), tostring(name))
                 end
             end
         end
     else
         add("  GetDifficultyInfo unavailable")
+    end
+    if ns.Catalog and ns.Catalog.GetLockoutShareMode then
+        add("--- Manual lockout share modes (sample journal ids) ---")
+        local samples = {
+            { 187, "Dragon Soul" },
+            { 758, "ICC" },
+            { 753, "Vault of Archavon" },
+            { 759, "Ulduar" },
+            { 78, "Firelands" },
+            { 369, "Siege of Orgrimmar" },
+        }
+        for _, row in ipairs(samples) do
+            add("  journal %s (%s) mode=%s",
+                tostring(row[1]), row[2], tostring(ns.Catalog.GetLockoutShareMode(row[1])))
+        end
     end
 
     local num = GetNumSavedInstances and GetNumSavedInstances() or 0
@@ -407,9 +422,13 @@ function Data.DumpDebugLockouts(skipRequest)
             jid = ns.Catalog.ResolveJournalId(instanceId, name)
             add("  ResolveJournalId => %s", tostring(jid))
         end
-        -- Which sibling difficulties this lockout would block (Blizzard toggle).
+        -- Which sibling difficulties this lockout would block (manual rules + toggle).
         if active and ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties then
-            local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId)
+            local jidForShare = jid or instanceId
+            local mode = ns.Catalog.GetLockoutShareMode
+                and ns.Catalog.GetLockoutShareMode(jidForShare)
+                or "?"
+            local shared = ns.Catalog.GetSharedLockoutDifficulties(difficultyId, jidForShare)
             if #shared > 0 then
                 local parts = {}
                 for _, otherId in ipairs(shared) do
@@ -418,9 +437,9 @@ function Data.DumpDebugLockouts(skipRequest)
                         or tostring(otherId)
                     parts[#parts + 1] = string.format("%s (%s)", tostring(otherId), tostring(label))
                 end
-                add("  blocks difficulties: %s", table.concat(parts, ", "))
+                add("  shareMode=%s blocks difficulties: %s", tostring(mode), table.concat(parts, ", "))
             else
-                add("  blocks difficulties: (none - independent lockout)")
+                add("  shareMode=%s blocks difficulties: (none)", tostring(mode))
             end
         end
     end
@@ -450,20 +469,23 @@ function Data.DumpDebugLockouts(skipRequest)
                             bi, tostring(boss.name), tostring(Data.IsEncounterKilledFlag(boss.killed)))
                     end
                 end
-                -- Inferred UI blocks for this stored lockout (toggle sibling).
+                -- Inferred UI blocks for this stored lockout (manual rules + toggle).
                 local instId = lo.instanceId
                 local diffId = lo.difficultyId
                 if ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
                     and Data.GetEffectiveLockout(guid, instId, diffId) then
-                    local shared = ns.Catalog.GetSharedLockoutDifficulties(diffId)
+                    local mode = ns.Catalog.GetLockoutShareMode
+                        and ns.Catalog.GetLockoutShareMode(instId)
+                        or "?"
+                    local shared = ns.Catalog.GetSharedLockoutDifficulties(diffId, instId)
                     for _, otherId in ipairs(shared) do
                         local st, _, _, by = Data.GetLockoutStatus(guid, instId, otherId)
                         if st == "blocked" then
                             local label = ns.Catalog.GetDifficultyLabel
                                 and ns.Catalog.GetDifficultyLabel(otherId)
                                 or tostring(otherId)
-                            add("    → UI blocks %s (%s) via toggle (blocker=%s)",
-                                tostring(otherId), tostring(label), tostring(by))
+                            add("    -> UI blocks %s (%s) mode=%s (blocker=%s)",
+                                tostring(otherId), tostring(label), tostring(mode), tostring(by))
                         end
                     end
                 end

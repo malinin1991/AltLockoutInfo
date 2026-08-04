@@ -2140,7 +2140,7 @@ do
 end
 
 ----------------------------------------------------------------
--- Shared lockout difficulties: only Blizzard toggleDifficultyID
+-- Shared lockouts: toggle pairs + manual pre-SoO unified rules
 ----------------------------------------------------------------
 do
     local ns = freshNs()
@@ -2148,79 +2148,137 @@ do
     local Data = ns.Data
     local DB = ns.DB
 
-    -- Flexible N/H/M/LFR are independent (Blizzard toggleDifficultyID == 0; Lua 0 is truthy).
-    local sharedNH = Catalog.GetSharedLockoutDifficulties(14)
-    assert_eq(#sharedNH, 0, "Shared: Normal (14) is independent (toggle=0 → empty)")
-    local sharedHN = Catalog.GetSharedLockoutDifficulties(15)
-    assert_eq(#sharedHN, 0, "Shared: Heroic (15) is independent")
+    assert_eq(Catalog.GetLockoutShareMode(187), "unified", "ShareMode: Dragon Soul is unified")
+    assert_eq(Catalog.GetLockoutShareMode(758), "unified", "ShareMode: ICC is unified")
+    assert_eq(Catalog.GetLockoutShareMode(753), "unified", "ShareMode: Vault of Archavon is unified")
+    assert_eq(Catalog.GetLockoutShareMode(78), "independent", "ShareMode: Firelands is independent")
+    assert_eq(Catalog.GetLockoutShareMode(759), "independent", "ShareMode: Ulduar is independent")
+    assert_eq(Catalog.GetLockoutShareMode(369), "independent", "ShareMode: SoO is independent")
+    assert_eq(Catalog.GetLockoutShareMode(nil), "toggle", "ShareMode: nil instance → toggle")
 
+    -- Without instance context: toggle-only behavior.
+    local sharedNH = Catalog.GetSharedLockoutDifficulties(14)
+    assert_eq(#sharedNH, 0, "Shared: Normal (14) toggle-independent")
     local shared10 = Catalog.GetSharedLockoutDifficulties(3)
     assert_eq(shared10[1], 5, "Shared: 10N ↔ 10H via toggleDifficultyID")
     local shared25 = Catalog.GetSharedLockoutDifficulties(6)
     assert_eq(shared25[1], 4, "Shared: 25H ↔ 25N via toggleDifficultyID")
-    local shared25n = Catalog.GetSharedLockoutDifficulties(4)
-    assert_eq(shared25n[1], 6, "Shared: 25N ↔ 25H via toggleDifficultyID")
 
-    -- Fallback pairs still work if GetDifficultyInfo omits toggle (truncated returns).
+    -- Encounter IDs / invalid diffs never share (and must not call GetDifficultyInfo).
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(1262), 0, "Shared: EJ encounter id has no shared lockout")
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(0), 0, "Shared: difficulty 0 is not a raid difficulty")
+
+    -- Fallback pairs still work if GetDifficultyInfo omits toggle.
     local prevGDI = _G.GetDifficultyInfo
     _G.GetDifficultyInfo = function(id)
         return "Diff" .. tostring(id)
     end
     assert_eq(Catalog.GetSharedLockoutDifficulties(6)[1], 4, "Shared: fallback 25H → 25N when API omits toggle")
-    assert_eq(Catalog.GetSharedLockoutDifficulties(3)[1], 5, "Shared: fallback 10N → 10H when API omits toggle")
     assert_eq(#Catalog.GetSharedLockoutDifficulties(14), 0, "Shared: fallback does not invent N↔H for flex")
     _G.GetDifficultyInfo = prevGDI
 
-    local sharedLfr = Catalog.GetSharedLockoutDifficulties(17)
-    assert_eq(#sharedLfr, 0, "Shared: LFR is independent")
-    local sharedMythic = Catalog.GetSharedLockoutDifficulties(16)
-    assert_eq(#sharedMythic, 0, "Shared: Mythic is independent")
-    local sharedLegacyLfr = Catalog.GetSharedLockoutDifficulties(7)
-    assert_eq(#sharedLegacyLfr, 0, "Shared: legacy LFR is independent")
+    -- Dragon Soul unified: 25H shares with all non-LFR; LFR stays free.
+    local dsShare = Catalog.GetSharedLockoutDifficulties(6, 187)
+    local dsSet = {}
+    for _, d in ipairs(dsShare) do
+        dsSet[d] = true
+    end
+    assert_eq(dsSet[3] == true, true, "DS unified: 25H shares with 10N")
+    assert_eq(dsSet[4] == true, true, "DS unified: 25H shares with 25N")
+    assert_eq(dsSet[5] == true, true, "DS unified: 25H shares with 10H")
+    assert_eq(dsSet[14] == true, true, "DS unified: 25H shares with flex Normal")
+    assert_eq(dsSet[7] == true, false, "DS unified: LFR not in share set")
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(7, 187), 0, "DS unified: LFR has no partners")
 
-    -- Encounter IDs (world bosses) must not call GetDifficultyInfo — would error in-game.
-    local sharedEnc = Catalog.GetSharedLockoutDifficulties(1262)
-    assert_eq(#sharedEnc, 0, "Shared: EJ encounter id has no shared lockout")
-    local sharedZero = Catalog.GetSharedLockoutDifficulties(0)
-    assert_eq(#sharedZero, 0, "Shared: difficulty 0 is not a raid difficulty")
+    -- SoO / Firelands / Ulduar TW: no cross-difficulty share.
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(15, 369), 0, "SoO: Heroic independent")
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(14, 78), 0, "Firelands: Normal independent")
+    assert_eq(#Catalog.GetSharedLockoutDifficulties(15, 759), 0, "Ulduar: Heroic independent")
 
     local guid = "Player-1-BLOCKED"
     DB.EnsureCharacter(guid)
     local now = time()
-    -- Heroic (15) must NOT block Normal (14) — loot-based independent lockouts (SoO+).
+
+    -- SoO+ loot-based: Heroic must NOT block Normal (journal 369).
     DB.SetLockouts(guid, {
-        [DB.LockoutKey(187, 15)] = {
-            instanceId = 187,
+        [DB.LockoutKey(369, 15)] = {
+            instanceId = 369,
             difficultyId = 15,
             locked = true,
             extended = false,
             resetAt = now + 7 * 24 * 3600,
             recordedAt = now,
-            numEncounters = 8,
+            numEncounters = 14,
             encounterProgress = 3,
+            bosses = {
+                { name = "Boss1", killed = true },
+                { name = "Boss2", killed = true },
+                { name = "Boss3", killed = true },
+                { name = "Boss4", killed = false },
+            },
+        },
+    })
+    assert_eq(Data.GetLockoutStatus(guid, 369, 15), "progress", "SoO: Heroic shows progress")
+    assert_eq(Data.GetLockoutStatus(guid, 369, 14), "free", "SoO: Normal stays free")
+    assert_eq(Data.GetLockoutStatus(guid, 369, 16), "free", "SoO: Mythic stays free")
+    assert_eq(Data.GetLockoutStatus(guid, 369, 17), "free", "SoO: LFR stays free")
+
+    -- Firelands TW: Heroic lockout must NOT block Normal.
+    local guidFL = "Player-1-FL"
+    DB.EnsureCharacter(guidFL)
+    DB.SetLockouts(guidFL, {
+        [DB.LockoutKey(78, 15)] = {
+            instanceId = 78,
+            difficultyId = 15,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 7,
+            encounterProgress = 2,
+            bosses = {
+                { name = "Shannox", killed = true },
+                { name = "Beth'tilac", killed = true },
+            },
+        },
+    })
+    assert_eq(Data.GetLockoutStatus(guidFL, 78, 15), "progress", "Firelands: Heroic shows progress")
+    assert_eq(Data.GetLockoutStatus(guidFL, 78, 14), "free", "Firelands: Normal stays free")
+
+    -- Dragon Soul: 25H blocks every non-LFR difficulty.
+    local guidDS = "Player-1-DS"
+    DB.EnsureCharacter(guidDS)
+    DB.SetLockouts(guidDS, {
+        [DB.LockoutKey(187, 6)] = {
+            instanceId = 187,
+            difficultyId = 6,
+            locked = true,
+            extended = false,
+            resetAt = now + 7 * 24 * 3600,
+            recordedAt = now,
+            numEncounters = 8,
+            encounterProgress = 8,
             bosses = {
                 { name = "Morchok", killed = true },
                 { name = "Zon'ozz", killed = true },
                 { name = "Yor'sahj", killed = true },
-                { name = "Hagara", killed = false },
+                { name = "Hagara", killed = true },
+                { name = "Ultraxion", killed = true },
+                { name = "Blackhorn", killed = true },
+                { name = "Spine", killed = true },
+                { name = "Madness", killed = true },
             },
         },
     })
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 6), "complete", "DS: 25H complete")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 3), "blocked", "DS: 10N blocked by 25H")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 4), "blocked", "DS: 25N blocked by 25H")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 5), "blocked", "DS: 10H blocked by 25H")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 14), "blocked", "DS: flex Normal blocked by 25H")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 15), "blocked", "DS: flex Heroic blocked by 25H")
+    assert_eq(Data.GetLockoutStatus(guidDS, 187, 7), "free", "DS: LFR remains free")
 
-    local statusH, pH, tH = Data.GetLockoutStatus(guid, 187, 15)
-    assert_eq(statusH, "progress", "Blocked: Heroic shows progress")
-    assert_eq(pH, 3, "Blocked: Heroic progress count")
-
-    local statusN = Data.GetLockoutStatus(guid, 187, 14)
-    assert_eq(statusN, "free", "Blocked: Normal stays free when only Heroic locked")
-
-    local statusM = Data.GetLockoutStatus(guid, 187, 16)
-    assert_eq(statusM, "free", "Blocked: Mythic remains free")
-
-    local statusLfr = Data.GetLockoutStatus(guid, 187, 17)
-    assert_eq(statusLfr, "free", "Blocked: LFR remains free")
-
-    -- Legacy 10N blocks 10H
+    -- ICC unified: 10N also blocks 25N (not only toggle partner).
     local guid2 = "Player-1-LEGACY"
     DB.EnsureCharacter(guid2)
     DB.SetLockouts(guid2, {
@@ -2236,86 +2294,17 @@ do
             bosses = { { name = "Lord Marrowgar", killed = true } },
         },
     })
-    local st10h, _, _, by10 = Data.GetLockoutStatus(guid2, 758, 5)
-    assert_eq(st10h, "blocked", "Blocked: 10H blocked by 10N")
-    assert_eq(by10, 3, "Blocked: blocker is 10N")
-    local st25 = Data.GetLockoutStatus(guid2, 758, 4)
-    assert_eq(st25, "free", "Blocked: 25N not blocked by 10N")
+    assert_eq(Data.GetLockoutStatus(guid2, 758, 5), "blocked", "ICC: 10H blocked by 10N")
+    assert_eq(Data.GetLockoutStatus(guid2, 758, 4), "blocked", "ICC: 25N blocked by 10N (unified)")
+    assert_eq(Data.GetLockoutStatus(guid2, 758, 6), "blocked", "ICC: 25H blocked by 10N (unified)")
 
-    -- Legacy 10H blocks 10N (symmetric)
-    local guid10h = "Player-1-LEGACY-10H"
-    DB.EnsureCharacter(guid10h)
-    DB.SetLockouts(guid10h, {
-        [DB.LockoutKey(758, 5)] = {
-            instanceId = 758,
-            difficultyId = 5,
-            locked = true,
-            extended = false,
-            resetAt = now + 7 * 24 * 3600,
-            recordedAt = now,
-            numEncounters = 12,
-            encounterProgress = 2,
-            bosses = {
-                { name = "Lord Marrowgar", killed = true },
-                { name = "Lady Deathwhisper", killed = true },
-            },
-        },
-    })
-    local st10n, _, _, by10h = Data.GetLockoutStatus(guid10h, 758, 3)
-    assert_eq(st10n, "blocked", "Blocked: 10N blocked by 10H")
-    assert_eq(by10h, 5, "Blocked: blocker is 10H")
-
-    -- Legacy 25N ↔ 25H symmetric (4 ↔ 6)
-    local guid25n = "Player-1-LEGACY-25N"
-    DB.EnsureCharacter(guid25n)
-    DB.SetLockouts(guid25n, {
-        [DB.LockoutKey(758, 4)] = {
-            instanceId = 758,
-            difficultyId = 4,
-            locked = true,
-            extended = false,
-            resetAt = now + 7 * 24 * 3600,
-            recordedAt = now,
-            numEncounters = 12,
-            encounterProgress = 1,
-            bosses = { { name = "Lord Marrowgar", killed = true } },
-        },
-    })
-    local st25h, _, _, by25n = Data.GetLockoutStatus(guid25n, 758, 6)
-    assert_eq(st25h, "blocked", "Blocked: 25H blocked by 25N")
-    assert_eq(by25n, 4, "Blocked: blocker is 25N")
-    assert_eq(select(1, Data.GetLockoutStatus(guid25n, 758, 3)), "free",
-        "Blocked: 10N not blocked by 25N")
-
-    local guid25h = "Player-1-LEGACY-25H"
-    DB.EnsureCharacter(guid25h)
-    DB.SetLockouts(guid25h, {
-        [DB.LockoutKey(758, 6)] = {
-            instanceId = 758,
-            difficultyId = 6,
-            locked = true,
-            extended = false,
-            resetAt = now + 7 * 24 * 3600,
-            recordedAt = now,
-            numEncounters = 12,
-            encounterProgress = 3,
-            bosses = {
-                { name = "Lord Marrowgar", killed = true },
-                { name = "Lady Deathwhisper", killed = true },
-                { name = "Gunship Battle", killed = true },
-            },
-        },
-    })
-    local st25n, _, _, by25h = Data.GetLockoutStatus(guid25h, 758, 4)
-    assert_eq(st25n, "blocked", "Blocked: 25N blocked by 25H")
-    assert_eq(by25h, 6, "Blocked: blocker is 25H")
-
-    -- Debug dump includes toggle / blocks sections
+    -- Debug dump includes share mode samples
     local lines = Data.DumpDebugLockouts(true)
     local blob = table.concat(lines, "\n")
     assert_true(blob:find("Shared lockouts", 1, true) ~= nil, "DumpDebug: shared lockouts section")
     assert_true(blob:find("toggle=", 1, true) ~= nil, "DumpDebug: shows toggleDifficultyID")
-    assert_true(blob:find("independent", 1, true) ~= nil, "DumpDebug: marks independent diffs")
+    assert_true(blob:find("Manual lockout share modes", 1, true) ~= nil, "DumpDebug: manual modes section")
+    assert_true(blob:find("Dragon Soul", 1, true) ~= nil, "DumpDebug: lists Dragon Soul mode")
 end
 
 ----------------------------------------------------------------

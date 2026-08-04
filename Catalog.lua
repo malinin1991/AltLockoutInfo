@@ -129,19 +129,115 @@ local TOGGLE_FALLBACK = {
     [6] = 4,
 }
 
---- Other difficulty IDs that share an instance lockout with this one (empty if independent).
---- Per Blizzard: only GetDifficultyInfo toggleDifficultyID (legacy 10/25 N↔H: 3↔5, 4↔6).
---- Flexible Normal/Heroic (14/15), Mythic (16), LFR (7/17) are independent lockouts.
---- World-boss "difficulties" are journal encounter IDs — never pass them to GetDifficultyInfo
---- (can error and abort UI refresh after pools were already cleared).
-function Catalog.GetSharedLockoutDifficulties(diffId)
-    local id = tonumber(diffId)
-    if not id then
-        return {}
+local LFR_DIFFICULTY = {
+    [7] = true,
+    [17] = true,
+}
+
+--- Non-LFR difficulties that may share a weekly lockout on pre-SoO raids.
+local UNIFIED_SHARE_POOL = { 3, 4, 5, 6, 9, 14, 15, 16 }
+
+--- Lockout share modes (Blizzard does not expose these via API).
+--- unified     = one size/difficulty combo per week; all non-LFR share (pre-SoO).
+--- independent = each difficulty separate (SoO+ loot-based; Firelands TW exception).
+--- toggle      = only N↔H of the same size via toggleDifficultyID.
+Catalog.LOCKOUT_SHARE_UNIFIED = "unified"
+Catalog.LOCKOUT_SHARE_INDEPENDENT = "independent"
+Catalog.LOCKOUT_SHARE_TOGGLE = "toggle"
+
+--- Explicit overrides (journal instanceId). TW raids where N/H are independent.
+local LOCKOUT_SHARE_OVERRIDE = {
+    [78] = "independent",  -- Firelands (Timewalking update)
+    [759] = "independent", -- Ulduar (Timewalking: Normal/Heroic independent)
+    [369] = "independent", -- Siege of Orgrimmar (first flex loot-based raid)
+}
+
+--- Pre-SoO raids: clearing any non-LFR difficulty locks the rest (LFR stays separate).
+--- Black Temple (751) omitted: classic/TW single-difficulty; toggle/heuristic is fine.
+local LOCKOUT_SHARE_UNIFIED_IDS = {
+    -- Wrath
+    [753] = true, -- Vault of Archavon
+    [754] = true, -- Naxxramas
+    [755] = true, -- Obsidian Sanctum
+    [756] = true, -- Eye of Eternity
+    [757] = true, -- Trial of the Crusader
+    [758] = true, -- Icecrown Citadel
+    [760] = true, -- Onyxia's Lair
+    [761] = true, -- Ruby Sanctum
+    -- Cataclysm
+    [73] = true,  -- Blackwing Descent
+    [72] = true,  -- Bastion of Twilight
+    [74] = true,  -- Throne of the Four Winds
+    [75] = true,  -- Baradin Hold
+    [187] = true, -- Dragon Soul (N/H all sizes share; LFR separate)
+    -- Mists (pre-SoO)
+    [317] = true, -- Mogu'shan Vaults
+    [330] = true, -- Heart of Fear
+    [320] = true, -- Terrace of Endless Spring
+    [362] = true, -- Throne of Thunder
+}
+
+--- Modern flex ↔ legacy 10/25 (same loot tier). Used to widen unified share sets.
+local SHARE_DIFF_CROSSWALK = {
+    [14] = { 3, 4 },
+    [15] = { 5, 6 },
+    [3] = { 14 },
+    [4] = { 14 },
+    [5] = { 15 },
+    [6] = { 15 },
+}
+
+local function RaidHasLegacySizeDiffs(raid)
+    if type(raid) ~= "table" or type(raid.difficulties) ~= "table" then
+        return false
     end
-    if not Catalog.IsRaidDifficultyId(id) then
-        return {}
+    for _, d in ipairs(raid.difficulties) do
+        d = tonumber(d)
+        if d == 3 or d == 4 or d == 5 or d == 6 or d == 9 then
+            return true
+        end
     end
+    return false
+end
+
+local function RaidHasModernFlexDiffs(raid)
+    if type(raid) ~= "table" or type(raid.difficulties) ~= "table" then
+        return false
+    end
+    for _, d in ipairs(raid.difficulties) do
+        d = tonumber(d)
+        if d == 14 or d == 15 or d == 16 then
+            return true
+        end
+    end
+    return false
+end
+
+--- Resolve lockout-share mode for a journal instance.
+--- instanceId may be nil → toggle-only (safe default without raid context).
+function Catalog.GetLockoutShareMode(instanceId)
+    local id = tonumber(instanceId) or instanceId
+    if id == nil then
+        return Catalog.LOCKOUT_SHARE_TOGGLE
+    end
+    local over = LOCKOUT_SHARE_OVERRIDE[id]
+    if over then
+        return over
+    end
+    if LOCKOUT_SHARE_UNIFIED_IDS[id] then
+        return Catalog.LOCKOUT_SHARE_UNIFIED
+    end
+    local raid = Catalog.GetRaidByInstanceId and Catalog.GetRaidByInstanceId(id)
+    if RaidHasLegacySizeDiffs(raid) then
+        return Catalog.LOCKOUT_SHARE_UNIFIED
+    end
+    if RaidHasModernFlexDiffs(raid) then
+        return Catalog.LOCKOUT_SHARE_INDEPENDENT
+    end
+    return Catalog.LOCKOUT_SHARE_TOGGLE
+end
+
+local function TogglePartnerDifficulties(id)
     local toggle
     if GetDifficultyInfo then
         -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
@@ -151,7 +247,6 @@ function Catalog.GetSharedLockoutDifficulties(diffId)
             toggle = tonumber(apiToggle)
         end
     end
-    -- Blizzard returns 0 when there is no partner; Lua treats 0 as truthy, so reject 0 explicitly.
     if not toggle or toggle == 0 then
         toggle = TOGGLE_FALLBACK[id]
     end
@@ -159,6 +254,99 @@ function Catalog.GetSharedLockoutDifficulties(diffId)
         return { toggle }
     end
     return {}
+end
+
+local function UnifiedShareDifficulties(id, instanceId)
+    if LFR_DIFFICULTY[id] then
+        return {}
+    end
+    local seen = {}
+    local pool = {}
+    local function addPool(d)
+        d = tonumber(d)
+        if not d or LFR_DIFFICULTY[d] or seen[d] then
+            return
+        end
+        if not Catalog.IsRaidDifficultyId(d) then
+            return
+        end
+        seen[d] = true
+        pool[#pool + 1] = d
+    end
+
+    local raid = instanceId and Catalog.GetRaidByInstanceId and Catalog.GetRaidByInstanceId(instanceId)
+    local raidDiffs = raid and type(raid.difficulties) == "table" and raid.difficulties
+    local hasRaidDiffs = false
+    if raidDiffs then
+        for _, d in ipairs(raidDiffs) do
+            if tonumber(d) then
+                hasRaidDiffs = true
+                break
+            end
+        end
+    end
+
+    if hasRaidDiffs then
+        -- Non-LFR difficulties present on the raid, plus legacy↔modern crosswalk partners.
+        local base = {}
+        for _, d in ipairs(raidDiffs) do
+            d = tonumber(d)
+            if d and not LFR_DIFFICULTY[d] and Catalog.IsRaidDifficultyId(d) then
+                base[#base + 1] = d
+                addPool(d)
+            end
+        end
+        for _, d in ipairs(base) do
+            local partners = SHARE_DIFF_CROSSWALK[d]
+            if partners then
+                for _, p in ipairs(partners) do
+                    addPool(p)
+                end
+            end
+        end
+        -- Diff not offered by this raid (e.g. Mythic on pre-Mythic ICC) does not share.
+        if not seen[id] then
+            return {}
+        end
+    else
+        for _, d in ipairs(UNIFIED_SHARE_POOL) do
+            addPool(d)
+        end
+    end
+
+    local list = {}
+    for _, d in ipairs(pool) do
+        if d ~= id then
+            list[#list + 1] = d
+        end
+    end
+    table.sort(list, function(a, b)
+        return (Catalog.GetDifficultyOrder(a) or 99) < (Catalog.GetDifficultyOrder(b) or 99)
+    end)
+    return list
+end
+
+--- Other difficulty IDs that share an instance lockout with this one (empty if independent).
+--- @param diffId number DifficultyID
+--- @param instanceId number|nil journal instanceId (needed for per-raid manual rules)
+--- Manual rules cover pre-SoO "one combo per week" (e.g. Dragon Soul); API only has N↔H toggle.
+function Catalog.GetSharedLockoutDifficulties(diffId, instanceId)
+    local id = tonumber(diffId)
+    if not id then
+        return {}
+    end
+    if not Catalog.IsRaidDifficultyId(id) then
+        return {}
+    end
+    local mode = Catalog.GetLockoutShareMode(instanceId)
+    if mode == Catalog.LOCKOUT_SHARE_INDEPENDENT then
+        return {}
+    end
+    if mode == Catalog.LOCKOUT_SHARE_UNIFIED then
+        return UnifiedShareDifficulties(id, instanceId)
+    end
+    -- toggle (default): legacy 10/25 N↔H only
+    return TogglePartnerDifficulties(id)
 end
 
 --- Find an encounter id already listed on a raid whose label matches bossName.
