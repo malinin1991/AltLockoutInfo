@@ -659,8 +659,21 @@ end
 
 local function RefreshDebugDump(requestRaidInfo)
     local Data = ns.Data
-    local lines = Data and Data.DumpDebugLockouts and Data.DumpDebugLockouts(not requestRaidInfo)
-        or { "debug unavailable" }
+    local lines
+    local ok, result = pcall(function()
+        if Data and Data.DumpDebugLockouts then
+            return Data.DumpDebugLockouts(not requestRaidInfo)
+        end
+        return { "debug unavailable" }
+    end)
+    if ok and type(result) == "table" then
+        lines = result
+    else
+        lines = {
+            "[ALI debug] DumpDebugLockouts failed:",
+            tostring(result),
+        }
+    end
     SetDebugEditText(table.concat(lines, "\n"))
     if requestRaidInfo and C_Timer and C_Timer.After then
         local token = {}
@@ -672,8 +685,12 @@ local function RefreshDebugDump(requestRaidInfo)
             if GetActiveTab() ~= "debug" then
                 return
             end
-            local again = Data and Data.DumpDebugLockouts and Data.DumpDebugLockouts(true) or lines
-            SetDebugEditText(table.concat(again, "\n"))
+            local ok2, again = pcall(function()
+                return Data and Data.DumpDebugLockouts and Data.DumpDebugLockouts(true) or lines
+            end)
+            if ok2 and type(again) == "table" then
+                SetDebugEditText(table.concat(again, "\n"))
+            end
         end)
     end
 end

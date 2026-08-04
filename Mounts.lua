@@ -39,7 +39,7 @@ local REFRESH_EVERY_N_SLICES = 4
 -- Sub-chunk loot within a single raid×difficulty to keep slices short.
 local LOOT_PER_SLICE = 40
 --- Bump when mountsCache.rows shape changes (forces disk invalidate).
-local MOUNTS_CACHE_VERSION = 6
+local MOUNTS_CACHE_VERSION = 7
 
 local function PersistCache()
     if type(cachedRows) ~= "table" then
@@ -341,12 +341,24 @@ local function SanitizeCachedWorldBossRows()
     end
 end
 
+--- Map modern flexible ↔ legacy 10/25 (same loot tier). LFR 7↔17 only when explicitly wanted.
+local DIFF_CROSSWALK = {
+    [14] = { 3, 4 },
+    [15] = { 5, 6 },
+    [17] = { 7 },
+    [3] = { 14 },
+    [4] = { 14 },
+    [5] = { 15 },
+    [6] = { 15 },
+    [7] = { 17 },
+}
+
 local function IntersectDiffs(wanted, available)
     if type(wanted) ~= "table" or #wanted == 0 then
         return available or {}
     end
     if type(available) ~= "table" or #available == 0 then
-        return wanted
+        return SortDiffs(wanted)
     end
     local allow = {}
     for _, d in ipairs(available) do
@@ -354,10 +366,17 @@ local function IntersectDiffs(wanted, available)
     end
     local out = {}
     local have = {}
-    for _, d in ipairs(wanted) do
-        if allow[d] and not have[d] then
+    local function add(d)
+        d = tonumber(d) or d
+        if d and allow[d] and not have[d] then
             out[#out + 1] = d
             have[d] = true
+        end
+    end
+    for _, d in ipairs(wanted) do
+        add(d)
+        for _, alt in ipairs(DIFF_CROSSWALK[d] or {}) do
+            add(alt)
         end
     end
     -- Keep explicit 10N/10H from the static list when 25-man exists (catalog probe often omits them).
@@ -369,13 +388,57 @@ local function IntersectDiffs(wanted, available)
             end
         end
     end
-    -- If none of the catalog diffs match (legacy↔modern id drift), use catalog diffs.
+    -- Do NOT fall back to the full catalog list: that injects LFR (7/17) for mounts that
+    -- only drop on N/H/M when modern↔legacy ids fail to intersect. Prefer supplement ids.
     if #out == 0 then
-        for _, d in ipairs(available) do
-            out[#out + 1] = d
-        end
+        return SortDiffs(wanted)
     end
     return SortDiffs(out)
+end
+
+--- True when EJ loot on this difficulty may be kept for itemID.
+--- If the item is in MountsSupplement with explicit difficulties, those (plus crosswalk) win.
+local function SupplementAllowsDifficulty(itemID, diffId)
+    if not itemID or diffId == nil then
+        return true
+    end
+    local list = ns.MountsSupplement
+    if type(list) ~= "table" then
+        return true
+    end
+    local wantDiff = tonumber(diffId) or diffId
+    for _, entry in ipairs(list) do
+        if entry.itemID == itemID and type(entry.difficulties) == "table" and #entry.difficulties > 0 then
+            local allow = {}
+            for _, d in ipairs(entry.difficulties) do
+                allow[d] = true
+                for _, alt in ipairs(DIFF_CROSSWALK[d] or {}) do
+                    allow[alt] = true
+                end
+            end
+            return allow[wantDiff] == true
+        end
+    end
+    return true
+end
+
+--- Replace row.difficulties with an authoritative list (e.g. MountsSupplement).
+local function ReplaceRowDifficulties(row, diffs)
+    if type(row) ~= "table" then
+        return
+    end
+    row.difficulties = {}
+    row._diffSet = {}
+    if type(diffs) ~= "table" then
+        return
+    end
+    for _, d in ipairs(diffs) do
+        if d ~= nil and not row._diffSet[d] then
+            row._diffSet[d] = true
+            row.difficulties[#row.difficulties + 1] = d
+        end
+    end
+    row.difficulties = SortDiffs(row.difficulties)
 end
 
 local function GetMountDisplay(mountID, fallbackName, fallbackIcon)
@@ -535,6 +598,9 @@ end
 --- Coalesce late item→mount discovery into the current aggregation — never restart a full EJ scan.
 local function PublishResolvedHit(hit)
     if type(hit) ~= "table" or not hit.itemID or not hit.mountID or not hit.instanceId then
+        return
+    end
+    if not SupplementAllowsDifficulty(hit.itemID, hit.diffId) then
         return
     end
     if scanState == STATE_SCANNING and type(scanByKey) == "table" then
@@ -806,6 +872,12 @@ function Mounts.MergeSupplement(byKey)
                                     diffId = diffId,
                                 })
                             end
+                            -- Supplement difficulties are authoritative: drop false EJ hits
+                            -- (e.g. Dragon Soul mounts shown on LFR/СПР though they never drop there).
+                            local row = byKey[key]
+                            if row then
+                                ReplaceRowDifficulties(row, diffs)
+                            end
                         else
                             Mounts.AddLootHit(byKey, {
                                 itemID = itemID,
@@ -898,29 +970,33 @@ local function ScanLootChunk(byKey, tier, raid, diffId, startOffset, gen, encoun
         if itemID then
             local mountID = Mounts.GetMountFromItem(itemID)
             if mountID then
-                local name, icon = GetMountDisplay(mountID, lootName, lootIcon)
-                Mounts.AddLootHit(byKey, {
-                    itemID = itemID,
-                    mountID = mountID,
-                    name = name,
-                    icon = icon,
-                    tierIndex = tier.index,
-                    tierName = tier.name,
-                    instanceId = instanceId,
-                    raidName = raid.name,
-                    diffId = effectiveDiffId,
-                })
+                if SupplementAllowsDifficulty(itemID, effectiveDiffId) then
+                    local name, icon = GetMountDisplay(mountID, lootName, lootIcon)
+                    Mounts.AddLootHit(byKey, {
+                        itemID = itemID,
+                        mountID = mountID,
+                        name = name,
+                        icon = icon,
+                        tierIndex = tier.index,
+                        tierName = tier.name,
+                        instanceId = instanceId,
+                        raidName = raid.name,
+                        diffId = effectiveDiffId,
+                    })
+                end
             else
-                QueueItemResolve(itemID, gen, {
-                    itemID = itemID,
-                    name = lootName,
-                    icon = lootIcon,
-                    tierIndex = tier.index,
-                    tierName = tier.name,
-                    instanceId = instanceId,
-                    raidName = raid.name,
-                    diffId = effectiveDiffId,
-                })
+                if SupplementAllowsDifficulty(itemID, effectiveDiffId) then
+                    QueueItemResolve(itemID, gen, {
+                        itemID = itemID,
+                        name = lootName,
+                        icon = lootIcon,
+                        tierIndex = tier.index,
+                        tierName = tier.name,
+                        instanceId = instanceId,
+                        raidName = raid.name,
+                        diffId = effectiveDiffId,
+                    })
+                end
             end
         end
     end

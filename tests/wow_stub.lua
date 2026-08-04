@@ -36,6 +36,11 @@ function M.reset()
     _G.GetNormalizedRealmName = function() return "TestRealm" end
     _G.GetRealmName = function() return "TestRealm" end
     _G.GetDifficultyInfo = function(id)
+        id = tonumber(id) or id
+        -- Blizzard can error / refuse non-DifficultyIDs (e.g. EJ encounter ids used as WB columns).
+        if type(id) ~= "number" or id < 1 or id > 50 then
+            error("Usage: GetDifficultyInfo(difficultyID)")
+        end
         local names = {
             [3] = "10 Player",
             [4] = "25 Player",

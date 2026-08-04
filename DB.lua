@@ -485,7 +485,8 @@ end
 
 function DB.SaveMountsCache(fingerprint, rows)
     local cache = EnsureRoot().mountsCache
-    cache.version = 6
+    -- Keep in sync with Mounts.lua MOUNTS_CACHE_VERSION.
+    cache.version = 7
     cache.fingerprint = fingerprint
     cache.rows = type(rows) == "table" and rows or {}
     cache.savedAt = (time and time()) or 0

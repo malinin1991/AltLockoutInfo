@@ -1437,6 +1437,102 @@ do
 end
 
 ----------------------------------------------------------------
+-- Dragon Soul mounts: LFR/СПР must not stick (EJ false positives + IntersectDiffs)
+----------------------------------------------------------------
+do
+    local ns = freshNs()
+    local Catalog = ns.Catalog
+    local Mounts = ns.Mounts
+
+    _G.EJ_GetNumTiers = function() return 1 end
+    _G.EJ_GetCurrentTier = function() return 1 end
+    _G.EJ_GetTierInfo = function() return "Cataclysm" end
+    _G.EJ_SelectInstance = function() end
+    -- Legacy DS catalog: LFR(7) + 10/25 N/H — no modern 14/15/16.
+    _G.EJ_IsValidInstanceDifficulty = function(d)
+        return d == 7 or d == 3 or d == 4 or d == 5 or d == 6
+    end
+    _G.EJ_GetInstanceByIndex = function(index, isRaid)
+        if index == 1 and isRaid then
+            return 187, "Dragon Soul", "d", 1, 2, 3, 4, 0, "l", true, 967
+        end
+        return nil
+    end
+
+    local selectedDiff
+    _G.EJ_SetDifficulty = function(d) selectedDiff = d end
+    _G.EJ_ResetLootFilter = function() end
+    -- EJ incorrectly lists Blazing Drake on every difficulty including LFR.
+    _G.EJ_GetNumLoot = function() return 1 end
+    _G.C_EncounterJournal = {
+        GetLootInfoByIndex = function()
+            return { itemID = 77067, name = "Reins of the Blazing Drake", icon = 1 }
+        end,
+    }
+    _G.C_MountJournal = {
+        GetMountFromItem = function(itemID)
+            if itemID == 77067 then return 442 end
+            return nil
+        end,
+        GetMountInfoByID = function(mountID)
+            if mountID == 442 then
+                return "Blazing Drake", 1, 2, false, true, 1, false, false, nil, false, false, 442
+            end
+            return nil
+        end,
+    }
+
+    Catalog.GetTiers(true)
+    local ds = Catalog.GetRaidByInstanceId(187)
+    assert_true(ds ~= nil, "DSLFR: Dragon Soul in catalog")
+    local has7 = false
+    for _, d in ipairs(ds.difficulties or {}) do
+        if d == 7 then has7 = true end
+    end
+    assert_eq(has7, true, "DSLFR: catalog still lists legacy LFR for lockouts")
+
+    local rows = Mounts.BuildFromEJSync()
+    local found
+    for _, row in ipairs(rows) do
+        if row.itemID == 77067 then
+            found = row
+            break
+        end
+    end
+    assert_true(found ~= nil, "DSLFR: Blazing Drake present")
+    local hasLfr = false
+    for _, d in ipairs(found.difficulties or {}) do
+        if d == 7 or d == 17 then
+            hasLfr = true
+        end
+    end
+    assert_eq(hasLfr, false, "DSLFR: mount difficulties exclude LFR/СПР")
+    -- Supplement {14,15,16} crosswalks onto legacy 10/25 when catalog has no flex ids.
+    local have = {}
+    for _, d in ipairs(found.difficulties or {}) do
+        have[d] = true
+    end
+    assert_eq(have[3] or have[4] or have[14] or false, true, "DSLFR: keeps Normal-tier difficulty")
+    assert_eq(have[5] or have[6] or have[15] or false, true, "DSLFR: keeps Heroic-tier difficulty")
+
+    -- Direct merge prune: EJ LFR hit then supplement must wipe 7.
+    local byKey = {}
+    Mounts.AddLootHit(byKey, {
+        itemID = 77067,
+        mountID = 442,
+        name = "Blazing Drake",
+        instanceId = 187,
+        raidName = "Dragon Soul",
+        tierIndex = 1,
+        tierName = "Cataclysm",
+        diffId = 7,
+    })
+    assert_eq(byKey["77067|187"]._diffSet[7], true, "DSLFR: pre-merge has LFR hit")
+    Mounts.MergeSupplement(byKey)
+    assert_eq(byKey["77067|187"]._diffSet[7] == true, false, "DSLFR: MergeSupplement prunes LFR")
+end
+
+----------------------------------------------------------------
 -- Mounts: persisted disk cache (ALInfoDB.mountsCache)
 ----------------------------------------------------------------
 do
@@ -2071,6 +2167,12 @@ do
     assert_eq(#sharedMythic, 0, "Shared: Mythic is independent")
     local sharedLegacyLfr = Catalog.GetSharedLockoutDifficulties(7)
     assert_eq(#sharedLegacyLfr, 0, "Shared: legacy LFR is independent")
+
+    -- Encounter IDs (world bosses) must not call GetDifficultyInfo — would error in-game.
+    local sharedEnc = Catalog.GetSharedLockoutDifficulties(1262)
+    assert_eq(#sharedEnc, 0, "Shared: EJ encounter id has no shared lockout")
+    local sharedZero = Catalog.GetSharedLockoutDifficulties(0)
+    assert_eq(#sharedZero, 0, "Shared: difficulty 0 is not a raid difficulty")
 
     local guid = "Player-1-BLOCKED"
     DB.EnsureCharacter(guid)

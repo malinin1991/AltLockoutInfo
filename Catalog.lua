@@ -97,8 +97,15 @@ function Catalog.GetDifficultyLabel(diffId)
     if key and L[key] then
         return L[key]
     end
-    local name = GetDifficultyInfo and GetDifficultyInfo(diffId)
-    return name or tostring(diffId)
+    -- Never call GetDifficultyInfo with EJ encounter IDs (world-boss columns).
+    local id = tonumber(diffId)
+    if id and Catalog.IsRaidDifficultyId(id) and GetDifficultyInfo then
+        local ok, name = pcall(GetDifficultyInfo, id)
+        if ok and name then
+            return name
+        end
+    end
+    return tostring(diffId)
 end
 
 --- True when id is a Blizzard raid DifficultyID (not a journal encounter id).
@@ -117,9 +124,14 @@ end
 --- Other difficulty IDs that share an instance lockout with this one (empty if independent).
 --- Per Blizzard: only GetDifficultyInfo toggleDifficultyID (legacy 10/25 N↔H: 3↔5, 4↔6).
 --- Flexible Normal/Heroic (14/15), Mythic (16), LFR (7/17) are independent lockouts.
+--- World-boss "difficulties" are journal encounter IDs — never pass them to GetDifficultyInfo
+--- (can error and abort UI refresh after pools were already cleared).
 function Catalog.GetSharedLockoutDifficulties(diffId)
     local id = tonumber(diffId)
     if not id then
+        return {}
+    end
+    if not Catalog.IsRaidDifficultyId(id) then
         return {}
     end
     if not GetDifficultyInfo then
@@ -127,7 +139,12 @@ function Catalog.GetSharedLockoutDifficulties(diffId)
     end
     -- name, groupType, isHeroic, isChallengeMode, displayHeroic, displayMythic, toggleDifficultyID
     -- Blizzard returns 0 when there is no partner; Lua treats 0 as truthy, so reject 0 explicitly.
-    local toggle = tonumber(select(7, GetDifficultyInfo(id)))
+    local ok, toggle = pcall(function()
+        return tonumber(select(7, GetDifficultyInfo(id)))
+    end)
+    if not ok then
+        return {}
+    end
     if toggle and toggle ~= 0 and toggle ~= id then
         return { toggle }
     end

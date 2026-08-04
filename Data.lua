@@ -343,19 +343,26 @@ function Data.DumpDebugLockouts(skipRequest)
     local dumpDiffs = { 3, 4, 5, 6, 7, 9, 14, 15, 16, 17 }
     if GetDifficultyInfo then
         for _, diffId in ipairs(dumpDiffs) do
-            local name, _, isHeroic, _, _, _, toggle = GetDifficultyInfo(diffId)
-            local shared = (ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
-                and ns.Catalog.GetSharedLockoutDifficulties(diffId)) or {}
-            if toggle and tonumber(toggle) and tonumber(toggle) ~= 0 then
-                add("  diff %s (%s) heroic=%s toggle=%s → blocks {%s}",
-                    tostring(diffId),
-                    tostring(name),
-                    tostring(isHeroic),
-                    tostring(toggle),
-                    table.concat(shared, ","))
+            local ok, name, _, isHeroic, _, _, _, toggle = pcall(function()
+                return GetDifficultyInfo(diffId)
+            end)
+            if not ok then
+                add("  diff %s GetDifficultyInfo error: %s", tostring(diffId), tostring(name))
             else
-                add("  diff %s (%s) independent (no toggle)",
-                    tostring(diffId), tostring(name))
+                local shared = (ns.Catalog and ns.Catalog.GetSharedLockoutDifficulties
+                    and ns.Catalog.GetSharedLockoutDifficulties(diffId)) or {}
+                local toggleNum = tonumber(toggle)
+                if toggleNum and toggleNum ~= 0 then
+                    add("  diff %s (%s) heroic=%s toggle=%s -> blocks {%s}",
+                        tostring(diffId),
+                        tostring(name),
+                        tostring(isHeroic),
+                        tostring(toggle),
+                        table.concat(shared, ","))
+                else
+                    add("  diff %s (%s) independent (no toggle)",
+                        tostring(diffId), tostring(name))
+                end
             end
         end
     else
@@ -414,7 +421,7 @@ function Data.DumpDebugLockouts(skipRequest)
                 end
                 add("  blocks difficulties: %s", table.concat(parts, ", "))
             else
-                add("  blocks difficulties: (none — independent lockout)")
+                add("  blocks difficulties: (none - independent lockout)")
             end
         end
     end
