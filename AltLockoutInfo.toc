@@ -1,0 +1,22 @@
+## Interface: 120001, 121000
+## Title: Alt Lockout Info
+## Notes: Track raid lockouts across your alts. | Отслеживание рейд-локаутов по альтам.
+## Notes-ruRU: Отслеживание рейд-локаутов по альтам учётной записи. Данные появляются только после входа на персонажа. Разные Battle.net-аккаунты не синхронизируются. LFR-секции могут отображаться как отдельные записи.
+## Author: GeeKaZ0iD
+## Version: 1.0.1
+## SavedVariables: ALInfoDB
+## LoadOnDemand: 0
+
+Locales\enUS.lua
+Locales\ruRU.lua
+DB.lua
+Data.lua
+Catalog.lua
+MountsData.lua
+Mounts.lua
+Core.lua
+UI_Shared.lua
+UI_Main.lua
+UI_Options.lua
+UI_Debug.lua
+MinimapButton.lua
